@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C2Agent Console</title>
+    <style>
+        :root {
+            --bg: #f6f7fb; --surface: #ffffff; --surface-2: #f1f3f8; --border: #e4e7ef;
+            --text: #1f2333; --text-2: #6b7280; --text-3: #9ca3af;
+            --accent: #6366f1; --accent-2: #8b5cf6; --accent-soft: #eef0ff;
+            --danger: #ef4444; --success: #10b981; --warning: #f59e0b;
+            --top-btn-red: #fca5a5; --top-btn-green: #86efac; --top-btn-blue: #93c5fd;
+            --user-bubble: #eef0ff; --ai-bubble: #ffffff;
+            --result-bg: #eef1f7; --result-text: #334155; --result-border: #d5dbe8;
+            --result-inner: #e2e7f1; --result-hi: rgba(255,255,255,0.7);
+            --shadow: 0 10px 30px rgba(31,35,51,0.08); --shadow-sm: 0 2px 8px rgba(31,35,51,0.06);
+            --sidebar-w: 260px; --session-w: 220px;
+        }
+        [data-theme="dark"] {
+            --bg: #0f1117; --surface: #171a21; --surface-2: #1e222b; --border: #2a2f3a;
+            --text: #e7e9ee; --text-2: #9aa3b2; --text-3: #6b7280;
+            --accent: #818cf8; --accent-2: #a78bfa; --accent-soft: #232741;
+            --danger: #f87171; --success: #34d399; --warning: #fbbf24;
+            --top-btn-red: #7f1d1d; --top-btn-green: #14532d; --top-btn-blue: #1e3a8a;
+            --user-bubble: #232741; --ai-bubble: #1e222b;
+            --result-bg: #11141b; --result-text: #c7d2e3; --result-border: #262d3d;
+            --result-inner: #0b0e14; --result-hi: rgba(255,255,255,0.05);
+            --shadow: 0 10px 30px rgba(0,0,0,0.35); --shadow-sm: 0 2px 8px rgba(0,0,0,0.25);
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { height: 100%; }
+        body { font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; overflow: hidden; transition: background .25s, color .25s; }
+
+        .topbar { display: flex; align-items: center; gap: 16px; padding: 0 20px; height: 60px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; z-index: 50; }
+        .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; white-space: nowrap; }
+        .brand .logo { width: 30px; height: 30px; border-radius: 9px; background: linear-gradient(135deg, var(--accent), var(--accent-2)); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 15px; box-shadow: 0 4px 12px rgba(99,102,241,.35); }
+        .spacer { flex: 1; }
+        .top-actions { display: flex; gap: 8px; }
+        .icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); cursor: pointer; transition: all .15s; flex-shrink: 0; font-family: inherit; }
+        .icon-btn:hover { background: var(--surface-2); border-color: var(--text-3); }
+        .icon-btn:active { transform: scale(.95); }
+        .icon-btn svg { width: 18px; height: 18px; }
+
+        .sidebar-dock { position: fixed; top: 60px; left: 0; bottom: 0; display: flex; z-index: 55; box-shadow: var(--shadow); transform: translateX(-100%); transition: transform .28s ease; }
+        body.agent-sidebar-open .sidebar-dock { transform: translateX(0); }
+        .agent-sidebar { position: relative; width: var(--sidebar-w); background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 16px 0; }
+        .agent-sidebar h3, .session-sidebar h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--text-3); margin: 0 16px 10px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
+        .agent-sidebar .agent-list, .session-sidebar .session-list { flex: 1; overflow-y: auto; }
+        .agent-item { padding: 10px 16px; cursor: pointer; border-left: 3px solid transparent; transition: background .12s; }
+        .agent-item:hover { background: var(--surface-2); }
+        .agent-item.active { background: var(--accent-soft); border-left-color: var(--accent); }
+        .agent-item .aid { font-weight: 600; font-size: 13.5px; word-break: break-all; }
+        .agent-item .host { font-size: 12px; color: var(--text-2); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .agent-item .os { font-size: 11px; color: var(--text-3); margin-top: 1px; }
+        .agent-empty, .session-empty { padding: 24px 16px; text-align: center; color: var(--text-3); font-size: 13px; }
+
+        .session-sidebar { position: relative; width: var(--session-w); background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 16px 0; }
+        .session-item { display: flex; align-items: center; gap: 8px; padding: 9px 12px 9px 16px; cursor: pointer; border-left: 3px solid transparent; transition: background .12s; }
+        .session-item:hover { background: var(--surface-2); }
+        .session-item.active { background: var(--accent-soft); border-left-color: var(--accent); }
+        .session-item .smeta { flex: 1; min-width: 0; }
+        .session-item .stitle { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .session-item .sstate { font-size: 11px; color: var(--text-3); margin-top: 1px; }
+        .session-item .sdot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex-shrink: 0; }
+        .session-item.running .sdot { background: var(--success); box-shadow: 0 0 0 3px rgba(16,185,129,.18); }
+        .session-item .sclose { border: none; background: transparent; color: var(--text-3); cursor: pointer; font-size: 15px; line-height: 1; padding: 2px 4px; border-radius: 6px; }
+        .session-item .sclose:hover { background: var(--border); color: var(--text); }
+        .mini-btn { border: 1px solid var(--border); background: var(--surface); color: var(--text-2); border-radius: 7px; font-size: 11px; padding: 2px 8px; cursor: pointer; font-family: inherit; }
+        .mini-btn:hover { border-color: var(--accent); color: var(--text); }
+
+        .agent-backdrop { position: fixed; inset: 0; background: rgba(15,17,23,.4); opacity: 0; pointer-events: none; transition: opacity .25s ease; z-index: 49; }
+        .agent-backdrop.show { opacity: 1; pointer-events: auto; }
+        @media (min-width: 901px) { .agent-backdrop { display: none; } }
+
+        .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 8px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); font-size: 13px; font-weight: 500; cursor: pointer; transition: all .15s; white-space: nowrap; font-family: inherit; }
+        .btn:hover { background: var(--surface-2); border-color: var(--text-3); }
+        .btn:active { transform: scale(.97); }
+        .btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+        .btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); border: none; color: #fff; box-shadow: 0 4px 12px rgba(99,102,241,.3); }
+        .btn.primary:hover { opacity: .92; }
+        .btn.danger { background: var(--danger); border: none; color: #fff; }
+        .btn.danger:hover { opacity: .9; }
+        .btn.ghost { background: transparent; }
+        .btn.small { padding: 6px 10px; font-size: 12px; border-radius: 8px; }
+        .btn.small svg { width: 14px; height: 14px; }
+        .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+        .command-panel { height: 0; overflow: hidden; background: var(--surface); border-bottom: 1px solid var(--border); transition: height .25s ease, margin-left .28s ease; flex-shrink: 0; }
+        .command-panel.visible { height: 64px; }
+        .command-panel-inner { display: flex; align-items: stretch; gap: 10px; padding: 12px 20px; }
+        .command-input-wrap { flex: 1; display: flex; align-items: center; gap: 8px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 0 12px; }
+        .command-input-wrap:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+        .command-input-wrap svg { width: 15px; height: 15px; color: var(--text-3); flex-shrink: 0; }
+        .command-input-wrap input { flex: 1; min-width: 0; padding: 10px 0; border: none; background: transparent; color: var(--text); font-size: 14px; font-family: inherit; }
+        .command-input-wrap input:focus { outline: none; }
+        .text-input { flex: 1; padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); color: var(--text); font-size: 14px; font-family: inherit; }
+        .text-input:focus { outline: none; border-color: var(--accent); }
+
+        .main { flex: 1; display: flex; overflow: hidden; position: relative; transition: margin-left .28s ease; }
+        body.agent-sidebar-open .main { margin-left: calc(var(--sidebar-w) + var(--session-w)); }
+        body.agent-sidebar-open .command-panel { margin-left: calc(var(--sidebar-w) + var(--session-w)); }
+        .chat-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+        .chat-scroll { flex: 1; overflow-y: auto; padding: 24px 0; }
+        .chat-inner { width: 100%; padding: 0 28px; display: flex; flex-direction: column; gap: 14px; }
+        .msg { max-width: 82%; padding: 12px 16px; border-radius: 14px; font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; position: relative; }
+        .msg.user { align-self: flex-end; background: var(--user-bubble); border-bottom-right-radius: 4px; }
+        .msg.ai { align-self: flex-start; background: var(--ai-bubble); border: 1px solid var(--border); border-bottom-left-radius: 4px; box-shadow: var(--shadow-sm); }
+        .msg.system { align-self: center; max-width: 92%; background: var(--surface-2); color: var(--text-2); font-size: 13px; border-radius: 10px; border: 1px solid var(--border); }
+        .msg.result { align-self: flex-start; max-width: 96%; background: var(--result-bg); color: var(--result-text); font-family: "SFMono-Regular", "JetBrains Mono", Consolas, monospace; font-size: 12.5px; line-height: 1.55; border: 1px solid var(--result-border); border-radius: 10px; border-top-left-radius: 4px; box-shadow: inset 0 1px 0 var(--result-hi); }
+        .collapsible-content { max-height: 220px; overflow: hidden; position: relative; transition: max-height .3s; }
+        .collapsible-content.expanded { max-height: none; }
+        .collapsible-content::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 40px; background: linear-gradient(transparent, var(--surface-2)); pointer-events: none; }
+        .collapsible-content.expanded::after { display: none; }
+        .msg.result .collapsible-content::after { background: linear-gradient(transparent, var(--result-bg)); }
+        .collapsible-toggle { display: none; margin-top: 6px; }
+        .collapsible-toggle.show { display: inline-flex; }
+
+        .typing { align-self: flex-start; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-radius: 14px; background: var(--surface); border: 1px solid var(--border); color: var(--text-2); font-size: 13px; }
+        .typing-dots { display: flex; gap: 4px; }
+        .typing-dots span { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); animation: bounce 1.3s infinite ease-in-out both; }
+        .typing-dots span:nth-child(2) { animation-delay: .15s; }
+        .typing-dots span:nth-child(3) { animation-delay: .3s; }
+        @keyframes bounce { 0%,80%,100% { transform: scale(.6); opacity: .5; } 40% { transform: scale(1); opacity: 1; } }
+        .typing.hidden { display: none; }
+
+        .composer { display: flex; align-items: flex-end; gap: 10px; padding: 14px 28px 18px; width: 100%; }
+        .composer textarea { flex: 1; resize: none; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--text); font-size: 14px; font-family: inherit; line-height: 1.5; max-height: 140px; box-shadow: var(--shadow-sm); }
+        .composer textarea:focus { outline: none; border-color: var(--accent); }
+        .composer .send-btn { align-self: stretch; aspect-ratio: 1/1; border-radius: 14px; border: none; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 12px rgba(99,102,241,.3); transition: transform .15s, opacity .15s; flex-shrink: 0; }
+        .composer .send-btn:hover { opacity: .9; }
+        .composer .send-btn:active { transform: scale(.92); }
+        .composer .send-btn:disabled { opacity: .4; cursor: not-allowed; }
+        .send-btn svg { width: 18px; height: 18px; }
+        .composer .send-btn.stop { background: linear-gradient(135deg, var(--danger), #b91c1c); box-shadow: 0 4px 12px rgba(239,68,68,.35); }
+
+        .files-panel { position: absolute; inset: 0; background: var(--bg); z-index: 40; display: none; flex-direction: column; padding: 20px; gap: 12px; }
+        .files-panel.visible { display: flex; }
+        .files-toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+        .files-path-row { display: flex; gap: 8px; }
+        .files-path-row .text-input { flex: 1; }
+        .files-list { flex: 1; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow-sm); }
+        .file-row { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background .12s; }
+        .file-row:last-child { border-bottom: none; }
+        .file-row:hover { background: var(--surface-2); }
+        .file-row.selected { background: var(--accent-soft); }
+        .file-icon { font-size: 17px; width: 24px; text-align: center; display: inline-flex; align-items: center; justify-content: center; }
+        .file-icon svg { width: 20px; height: 20px; }
+        .file-name { flex: 1; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .file-size { font-size: 12px; color: var(--text-3); }
+        .files-empty { padding: 40px; text-align: center; color: var(--text-3); font-size: 13px; }
+
+        .drawer { position: fixed; top: 60px; right: 0; bottom: 0; width: 300px; background: var(--surface); border-left: 1px solid var(--border); box-shadow: var(--shadow); transform: translateX(100%); transition: transform .28s ease; z-index: 60; padding: 24px; overflow-y: auto; }
+        .drawer.visible { transform: translateX(0); }
+        .drawer h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--text-3); margin: 20px 0 12px; font-weight: 600; }
+        .drawer h3:first-child { margin-top: 0; }
+        .drawer .divider { height: 1px; background: var(--border); margin: 20px 0; }
+        .drawer .btn { width: 100%; margin-top: 8px; }
+
+        .auth-segmented { position: relative; display: flex; padding: 3px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; }
+        .auth-seg-thumb { position: absolute; top: 3px; bottom: 3px; left: 3px; width: calc((100% - 6px)/3); background: var(--surface); border-radius: 9px; box-shadow: var(--shadow-sm); transition: transform .25s cubic-bezier(.4,0,.2,1); z-index: 0; }
+        .auth-seg { position: relative; z-index: 1; flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; border: none; background: transparent; color: var(--text-2); font-family: inherit; font-size: 12px; font-weight: 600; padding: 8px 4px; border-radius: 9px; cursor: pointer; white-space: nowrap; transition: color .2s; }
+        .auth-seg.active { color: var(--text); }
+        .auth-seg-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; opacity: 0; transform: scale(.5); transition: opacity .2s, transform .2s; }
+        .auth-seg.active .auth-seg-dot { opacity: 1; transform: scale(1); }
+        .auth-seg[data-mode="0"] .auth-seg-dot { background: var(--danger); }
+        .auth-seg[data-mode="1"] .auth-seg-dot { background: var(--warning); }
+        .auth-seg[data-mode="2"] .auth-seg-dot { background: var(--success); }
+        .auth-desc { margin-top: 10px; font-size: 12px; line-height: 1.5; color: var(--text-2); }
+
+        .modal { display: none; position: fixed; inset: 0; background: rgba(15,17,23,.55); backdrop-filter: blur(4px); align-items: center; justify-content: center; z-index: 1000; }
+        .modal.show { display: flex; }
+        .modal-card { background: var(--surface); border-radius: 16px; box-shadow: var(--shadow); padding: 24px; width: 92%; max-width: 540px; max-height: 80vh; overflow-y: auto; border: 1px solid var(--border); }
+        .modal-card h3 { font-size: 16px; margin-bottom: 6px; }
+        .modal-card .sub { color: var(--text-2); font-size: 13px; margin-bottom: 16px; }
+        .modal-commands { background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 14px; max-height: 320px; overflow-y: auto; }
+        .modal-cmd-item { padding: 10px; }
+        .cmd-action { font-weight: 600; font-size: 13.5px; color: var(--accent); }
+        .cmd-params { font-size: 12.5px; color: var(--text-2); margin-top: 4px; font-family: monospace; white-space: pre-wrap; }
+        .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+        .modal-input { width: 100%; padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); color: var(--text); font-size: 14px; margin: 14px 0; }
+        .modal-input:focus { outline: none; border-color: var(--accent); }
+        .radio-group { display: flex; gap: 20px; margin: 12px 0; }
+        .radio-group label { display: flex; align-items: center; gap: 6px; font-size: 14px; cursor: pointer; }
+
+        .toast { position: fixed; top: 76px; left: 50%; transform: translateX(-50%) translateY(-8px); background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 10px 18px; font-size: 13px; font-weight: 500; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: opacity .2s ease, transform .2s ease; z-index: 2000; }
+        .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+        .toast.error { border-color: rgba(239,68,68,.4); color: var(--danger); }
+
+        ::-webkit-scrollbar { width: 9px; height: 9px; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+        ::-webkit-scrollbar-track { background: transparent; }
+
+        @media (max-width: 900px) {
+            .top-actions .btn span.lbl { display: none; }
+            .top-actions .btn { width: 52px; height: 28px; padding: 0; border-radius: 999px; border-color: transparent; }
+            #commandToggleBtn { background: var(--top-btn-red); }
+            #filesToggleBtn { background: var(--top-btn-green); }
+            #sidebarToggleBtn { background: var(--top-btn-blue); }
+            .chat-inner { padding: 0 14px; }
+            .composer { padding: 12px 14px 16px; }
+            body.agent-sidebar-open .main { margin-left: 0; }
+            body.agent-sidebar-open .command-panel { margin-left: 0; }
+            .sidebar-dock { width: 100vw; max-width: 480px; }
+            .agent-sidebar, .session-sidebar { width: auto; flex: 1 1 50%; min-width: 0; }
+        }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <button class="icon-btn" id="agentSidebarToggle" title="Toggle agents / sessions">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+        </button>
+        <div class="brand"><div class="logo">C2</div><span>C2Agent Console</span></div>
+        <span class="spacer"></span>
+        <div class="top-actions">
+            <button class="btn" id="commandToggleBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 8h6"/><path d="M7 12h4"/><path d="M7 16h8"/></svg><span class="lbl">Command</span></button>
+            <button class="btn" id="filesToggleBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span class="lbl">Files</span></button>
+            <button class="btn" id="sidebarToggleBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg><span class="lbl">Controls</span></button>
+        </div>
+    </header>
+
+    <div class="sidebar-dock" id="sidebarDock">
+        <aside class="agent-sidebar" id="agentSidebar">
+            <h3>Online Agents</h3>
+            <div class="agent-list" id="agentList"></div>
+        </aside>
+        <aside class="session-sidebar" id="sessionSidebar">
+            <h3>Sessions <button class="mini-btn" id="newSessionBtn">+ New</button></h3>
+            <div class="session-list" id="sessionList"></div>
+        </aside>
+    </div>
+    <div class="agent-backdrop" id="agentSidebarBackdrop"></div>
+
+    <div class="command-panel" id="commandPanel">
+        <div class="command-panel-inner">
+            <div class="command-input-wrap">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-5-6-5"/><path d="M12 19h8"/></svg>
+                <input type="text" id="commandInput" placeholder="Run a shell command on the active agent..." autocomplete="off">
+            </div>
+            <button class="btn primary" id="commandExecuteBtn">Execute</button>
+        </div>
+    </div>
+
+    <div class="main">
+        <div class="chat-area">
+            <div class="chat-scroll" id="chatScroll"><div class="chat-inner" id="chatBox"></div></div>
+            <div class="composer">
+                <textarea id="messageInput" rows="1" placeholder="Ask the AI to inspect or manage the agent..." autocomplete="off"></textarea>
+                <button class="send-btn" id="sendBtn" title="Send">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                </button>
+            </div>
+        </div>
+
+        <div class="files-panel" id="filesPanel">
+            <div class="files-toolbar">
+                <button class="btn small" id="filesRefreshBtn">Refresh</button>
+                <button class="btn small" id="filesParentBtn">Parent</button>
+                <button class="btn small" id="filesNewBtn">New</button>
+                <button class="btn small" id="filesCopyBtn">Copy</button>
+                <button class="btn small" id="filesMoveBtn">Move</button>
+                <button class="btn small" id="filesDeleteBtn">Delete</button>
+                <button class="btn small" id="filesUploadBtn">Upload</button>
+                <button class="btn small" id="filesDownloadBtn">Download</button>
+                <input type="file" id="filesUploadInput" style="display:none;">
+            </div>
+            <div class="files-path-row">
+                <input type="text" class="text-input" id="filesPathInput" placeholder="Current path..." autocomplete="off">
+                <button class="btn small" id="filesAccessBtn">Go</button>
+            </div>
+            <div class="files-list" id="filesList"></div>
+        </div>
+
+        <aside class="drawer" id="sidebar">
+            <h3>Appearance</h3>
+            <button class="btn" id="themeToggle"><span class="lbl">Switch to Dark Mode</span></button>
+            <div class="divider"></div>
+            <h3>Authorization</h3>
+            <div class="auth-segmented" id="authSegmented" role="radiogroup">
+                <div class="auth-seg-thumb" id="authThumb"></div>
+                <button class="auth-seg active" data-mode="0"><span class="auth-seg-dot"></span>N-Auto</button>
+                <button class="auth-seg" data-mode="1"><span class="auth-seg-dot"></span>H-Auto</button>
+                <button class="auth-seg" data-mode="2"><span class="auth-seg-dot"></span>F-Auto</button>
+            </div>
+            <div class="auth-desc" id="authDesc"></div>
+            <div class="divider"></div>
+            <h3>Session</h3>
+            <button class="btn" id="resetBtn">Reset Session</button>
+            <button class="btn danger" id="shutdownBtn">Shutdown Agent</button>
+        </aside>
+    </div>
+
+    <div class="modal" id="cmdModal">
+        <div class="modal-card">
+            <h3>Command Authorization</h3>
+            <div class="sub">The AI requests permission to run the following action:</div>
+            <div class="modal-commands" id="modalCommands"></div>
+            <div class="modal-actions">
+                <button class="btn danger" id="modalDeny">Deny</button>
+                <button class="btn primary" id="modalAuthorize">Authorize</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="filesModal">
+        <div class="modal-card">
+            <h3 id="filesModalTitle">New</h3>
+            <input type="text" class="modal-input" id="filesModalInput" placeholder="Enter name..." value="New">
+            <div class="radio-group">
+                <label><input type="radio" name="filesModalType" value="file" checked> File</label>
+                <label><input type="radio" name="filesModalType" value="dir"> Directory</label>
+            </div>
+            <div class="modal-actions">
+                <button class="btn" id="filesModalCancel">Cancel</button>
+                <button class="btn primary" id="filesModalConfirm">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="filesPathModal">
+        <div class="modal-card">
+            <h3 id="filesPathModalTitle">Copy / Move</h3>
+            <input type="text" class="modal-input" id="filesPathModalInput" placeholder="Enter destination path...">
+            <div class="modal-actions">
+                <button class="btn" id="filesPathModalCancel">Cancel</button>
+                <button class="btn primary" id="filesPathModalConfirm">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+let activeAgent = null;
+let activeSession = null;
+let conversationActive = false;
+let aiSpan = null;
+let renderGen = 0;
+let lastActiveId = null;
+let eventSource = null;
+let pendingAction = null;
+
+async function getJSON(url) { const r = await fetch(url); return r.json(); }
+async function postJSON(url, body) {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    return r.json();
+}
+
+// ---------- toast ----------
+let toastTimer = null;
+function showToast(message, isError) {
+    const t = $('toast'); t.textContent = message; t.classList.toggle('error', !!isError);
+    t.classList.add('show'); clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// ---------- chat rendering ----------
+const chatBox = $('chatBox'), chatScroll = $('chatScroll'), messageInput = $('messageInput'), sendBtn = $('sendBtn');
+let autoScroll = true;
+const SEND_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>';
+const STOP_ICON = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>';
+const FILE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
+const DIR_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+
+function setSendIdle() { sendBtn.disabled = false; sendBtn.classList.remove('stop'); sendBtn.innerHTML = SEND_ICON; sendBtn.title = 'Send'; }
+function setSendStop() { sendBtn.disabled = false; sendBtn.classList.add('stop'); sendBtn.innerHTML = STOP_ICON; sendBtn.title = 'Stop response'; }
+
+function addMessage(content, type) {
+    const div = document.createElement('div'); div.className = 'msg ' + type;
+    const text = String(content ?? '');
+    const span = document.createElement('span'); span.textContent = text; div.appendChild(span);
+    if ((type === 'system' || type === 'result') && text.length > 500) {
+        const inner = document.createElement('div'); inner.className = 'collapsible-content';
+        while (div.firstChild) inner.appendChild(div.firstChild);
+        const toggle = document.createElement('button'); toggle.className = 'btn small ghost collapsible-toggle show'; toggle.textContent = 'Show more';
+        toggle.onclick = () => { const e = inner.classList.toggle('expanded'); toggle.textContent = e ? 'Show less' : 'Show more'; };
+        div.appendChild(inner); div.appendChild(toggle);
+    }
+    chatBox.appendChild(div);
+    if (autoScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
+}
+
+const typing = document.createElement('div');
+typing.className = 'typing hidden';
+typing.innerHTML = '<div class="typing-dots"><span></span><span></span><span></span></div><span class="typing-text">AI is thinking...</span>';
+function setTyping(text, show) {
+    if (show) { typing.querySelector('.typing-text').textContent = text; typing.classList.remove('hidden'); chatBox.appendChild(typing); }
+    else typing.classList.add('hidden');
+}
+function createAiBlock() { const d = document.createElement('div'); d.className = 'msg ai'; const s = document.createElement('span'); d.appendChild(s); chatBox.appendChild(d); return s; }
+function ensureAiBlock() { if (!aiSpan) aiSpan = createAiBlock(); return aiSpan; }
+
+// ---------- config / agents / sessions ----------
+const AUTH_DESC = [
+    'No-Auto: every command requires your authorization before execution.',
+    'Half-Auto: read/list commands run automatically; create, delete, edit and execute commands require authorization.',
+    'Full-Auto: all commands run automatically without authorization.'
+];
+function updateAuthUI(mode) {
+    const m = (mode === 1 || mode === 2) ? mode : 0;
+    $('authThumb').style.transform = `translateX(${m * 100}%)`;
+    $('authSegmented').querySelectorAll('.auth-seg').forEach(b => b.classList.toggle('active', Number(b.dataset.mode) === m));
+    $('authDesc').textContent = AUTH_DESC[m];
+}
+
+async function loadConfig() {
+    try { const c = await getJSON('/api/config'); updateAuthUI(c.auth_mode); activeAgent = c.active_agent || activeAgent; } catch (e) {}
+    await loadAgents();
+    await loadSessions();
+}
+
+async function loadAgents() {
+    try {
+        const data = await getJSON('/api/agents');
+        const list = $('agentList'); list.innerHTML = '';
+        if (!data.agents || data.agents.length === 0) {
+            const e = document.createElement('div'); e.className = 'agent-empty'; e.textContent = 'No agents online'; list.appendChild(e);
+            return;
+        }
+        const changed = (lastActiveId !== null && data.active !== lastActiveId);
+        lastActiveId = data.active;
+        activeAgent = data.active;
+        data.agents.forEach(a => {
+            const item = document.createElement('div');
+            item.className = 'agent-item' + (a.id === data.active ? ' active' : '');
+            const id = document.createElement('div'); id.className = 'aid'; id.textContent = a.id;
+            const host = document.createElement('div'); host.className = 'host'; host.textContent = a.hostname || '-';
+            const os = document.createElement('div'); os.className = 'os'; os.textContent = (a.kind || '') + ' · ' + (a.os || '');
+            item.append(id, host, os);
+            item.onclick = () => { if (a.id !== lastActiveId) switchAgent(a.id); };
+            list.appendChild(item);
+        });
+        if (changed) { await loadSessions(); }
+    } catch (e) { console.warn(e); }
+}
+
+async function switchAgent(id) {
+    await postJSON('/api/agents/switch', { agent_id: id });
+    renderGen++; lastActiveId = id; activeAgent = id; activeSession = null;
+    closeStream(); clearChat();
+    filesCwd = '.';
+    await loadAgents();
+    await loadSessions();
+    if (filesPanel.classList.contains('visible')) loadFilesList();
+}
+
+// Render the session list. If nothing is attached (or the attached session
+// disappeared), attach the server's active session. Does not recurse.
+async function loadSessions() {
+    const list = $('sessionList'); list.innerHTML = '';
+    if (!activeAgent) { const e = document.createElement('div'); e.className = 'session-empty'; e.textContent = 'No agent'; list.appendChild(e); return; }
+    let data;
+    try { data = await getJSON('/api/sessions?agent_id=' + encodeURIComponent(activeAgent)); } catch (e) { return; }
+    const sessions = data.sessions || [];
+    if (sessions.length === 0) { const e = document.createElement('div'); e.className = 'session-empty'; e.textContent = 'No sessions yet'; list.appendChild(e); return; }
+    sessions.forEach(s => {
+        const item = document.createElement('div');
+        item.dataset.sid = s.id;
+        item.className = 'session-item' + (s.id === activeSession ? ' active' : '') + (s.running ? ' running' : '');
+        const dot = document.createElement('div'); dot.className = 'sdot';
+        const meta = document.createElement('div'); meta.className = 'smeta';
+        const title = document.createElement('div'); title.className = 'stitle'; title.textContent = s.title || s.id;
+        const state = document.createElement('div'); state.className = 'sstate'; state.textContent = s.running ? 'running' : (s.phase || 'idle');
+        meta.append(title, state);
+        const close = document.createElement('button'); close.className = 'sclose'; close.textContent = '×'; close.title = 'Close session';
+        close.onclick = async (ev) => { ev.stopPropagation(); await postJSON('/api/sessions/close', { session_id: s.id }); if (activeSession === s.id) { closeStream(); activeSession = null; clearChat(); } await loadSessions(); };
+        item.append(dot, meta, close);
+        item.onclick = () => activateSession(s.id);
+        list.appendChild(item);
+    });
+    const attached = sessions.some(s => s.id === activeSession);
+    if (!attached && data.active) await attachSession(data.active, true);
+}
+
+async function newSession() {
+    if (!activeAgent) { showToast('No active agent', true); return; }
+    const r = await postJSON('/api/sessions/new', { agent_id: activeAgent, title: '' });
+    if (r.error) { showToast(r.error, true); return; }
+    activeSession = null;
+    await loadSessions();
+    if (r.session) await attachSession(r.session, true);
+}
+
+async function activateSession(id) { await attachSession(id, true); }
+
+// Attach history + live stream to a session. syncActive persists it as the
+// agent's active session on the server.
+async function attachSession(id, syncActive) {
+    if (!id) return;
+    if (id === activeSession && eventSource) return;
+    if (syncActive) await postJSON('/api/sessions/activate', { agent_id: activeAgent, session_id: id });
+    renderGen++;
+    activeSession = id;
+    highlightSession(id);
+    await loadHistory(id);
+    openStream(id);
+}
+
+function highlightSession(id) {
+    document.querySelectorAll('#sessionList .session-item').forEach(el => el.classList.toggle('active', el.dataset.sid === id));
+}
+
+function clearChat() { chatBox.innerHTML = ''; aiSpan = null; conversationActive = false; setSendIdle(); }
+
+async function loadHistory(id) {
+    chatBox.innerHTML = '';
+    try {
+        const data = await getJSON('/api/history?session_id=' + encodeURIComponent(id));
+        (data.history || []).forEach(item => {
+            const t = item.role === 'user' ? 'user' : (item.role === 'assistant' ? 'ai' : (item.role === 'result' ? 'result' : 'system'));
+            addMessage(item.text, t);
+        });
+    } catch (e) {}
+    chatScroll.scrollTop = chatScroll.scrollHeight;
+}
+
+// ---------- SSE stream ----------
+function closeStream() { if (eventSource) { eventSource.close(); eventSource = null; } }
+function openStream(id) {
+    closeStream();
+    const gen = renderGen;
+    const es = new EventSource('/api/chat-stream?session_id=' + encodeURIComponent(id));
+    eventSource = es;
+    es.onmessage = (e) => {
+        if (gen !== renderGen) return;
+        try { handleEvent(JSON.parse(e.data)); } catch (err) {}
+    };
+    es.onerror = () => { /* keep the stream: the browser auto-reconnects */ };
+}
+
+function handleEvent(ev) {
+    switch (ev.type) {
+        case 'snapshot':
+            if (ev.snapshot && ev.snapshot.running) { conversationActive = true; setSendStop(); setTyping('AI is thinking...', true); }
+            if (ev.snapshot && ev.snapshot.pending) showAuth(ev.snapshot.pending.action, ev.snapshot.pending.params);
+            break;
+        case 'idle': conversationActive = false; setSendIdle(); break;
+        case 'answering':
+            conversationActive = true; setSendStop();
+            setTyping(`AI is thinking... (Round ${ev.turn})`, true);
+            if (ev.turn > 1) aiSpan = null;
+            break;
+        case 'chunk': ensureAiBlock(); aiSpan.textContent += ev.content; if (autoScroll) chatScroll.scrollTop = chatScroll.scrollHeight; break;
+        case 'response_done': setTyping('', false); break;
+        case 'auth_required': setTyping('', false); pendingAction = { action: ev.action, params: ev.params }; showAuth(ev.action, ev.params); break;
+        case 'executing': setTyping('Executing...', true); break;
+        case 'execution_done':
+            setTyping('', false); aiSpan = null;
+            {
+                const p = ev.params || {};
+                const detail = p.command ? ` [${p.command}]` : (p.path ? ` [${p.path}]` : '');
+                addMessage(`[${ev.action}]${detail}\n${ev.result}`, 'result');
+            }
+            break;
+        case 'execution_denied':
+            setTyping('', false); aiSpan = null;
+            addMessage(`Denied: ${ev.action} (not executed)`, 'system');
+            break;
+        case 'stopped':
+            ensureAiBlock(); aiSpan.textContent += '\n[Stopped by user]'; setTyping('', false);
+            conversationActive = false; setSendIdle(); break;
+        case 'error':
+            ensureAiBlock(); aiSpan.textContent += `\n[Error: ${ev.error}]`; setTyping('', false);
+            conversationActive = false; setSendIdle(); break;
+        case 'done':
+            conversationActive = false; setSendIdle(); setTyping('', false); pendingAction = null;
+            loadSessions();
+            break;
+    }
+}
+
+async function sendMessage() {
+    const msg = messageInput.value.trim();
+    if (!msg || conversationActive) return;
+    if (!activeAgent) { showToast('No active agent', true); return; }
+    if (!activeSession) {
+        // Auto-create a session so the message can be sent immediately.
+        const r = await postJSON('/api/sessions/new', { agent_id: activeAgent, title: '' });
+        if (r.error) { showToast(r.error, true); return; }
+        activeSession = null;
+        await loadSessions();
+        if (!activeSession) await attachSession(r.session, true);
+        if (!activeSession) { showToast('Failed to create a session', true); return; }
+    }
+    autoScroll = true;
+    addMessage(msg, 'user');
+    messageInput.value = ''; messageInput.style.height = 'auto';
+    conversationActive = true; setSendStop(); setTyping('AI is thinking...', true);
+    aiSpan = null;
+    try {
+        const r = await postJSON('/api/send', { session_id: activeSession, message: msg });
+        if (r.error) { addMessage(r.error, 'system'); conversationActive = false; setSendIdle(); setTyping('', false); }
+        else if (r.session_id && r.session_id !== activeSession) activateSession(r.session_id);
+    } catch (e) { addMessage('Error: ' + e.message, 'system'); conversationActive = false; setSendIdle(); }
+    loadSessions();
+}
+
+async function requestStop() { if (!conversationActive) return; try { await postJSON('/api/stop', { session_id: activeSession }); } catch (e) {} }
+
+// ---------- auth modal ----------
+function showAuth(action, params) {
+    const box = $('modalCommands'); box.innerHTML = '';
+    const item = document.createElement('div'); item.className = 'modal-cmd-item';
+    const a = document.createElement('div'); a.className = 'cmd-action'; a.textContent = action;
+    const p = document.createElement('div'); p.className = 'cmd-params'; p.textContent = JSON.stringify(params || {}, null, 2);
+    item.append(a, p); box.appendChild(item);
+    $('cmdModal').classList.add('show');
+}
+async function submitAuth(ok) { $('cmdModal').classList.remove('show'); await postJSON('/api/authorize-execute', { session_id: activeSession, authorized: ok }); pendingAction = null; }
+
+// ---------- events ----------
+sendBtn.onclick = () => { if (conversationActive) requestStop(); else sendMessage(); };
+messageInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
+messageInput.addEventListener('input', () => { messageInput.style.height = 'auto'; messageInput.style.height = Math.min(messageInput.scrollHeight, 140) + 'px'; });
+$('modalDeny').onclick = () => { addMessage('Command execution denied by user.', 'system'); submitAuth(false); };
+$('modalAuthorize').onclick = () => submitAuth(true);
+$('newSessionBtn').onclick = newSession;
+$('authSegmented').addEventListener('click', async (e) => { const b = e.target.closest('.auth-seg'); if (!b) return; await postJSON('/api/set-auth', { mode: Number(b.dataset.mode) }); loadConfig(); });
+$('resetBtn').onclick = async () => { if (!activeSession) return; await postJSON('/api/reset', { session_id: activeSession }); clearChat(); addMessage('Session reset.', 'system'); };
+$('shutdownBtn').onclick = async () => {
+    if (!confirm('Shut down the active agent?')) return;
+    const r = await postJSON('/api/shutdown', { agent_id: activeAgent });
+    addMessage(r.success ? 'Shutdown command sent.' : ('Shutdown failed: ' + (r.error || 'unknown')), 'system');
+    loadAgents();
+};
+chatScroll.addEventListener('scroll', () => { autoScroll = chatScroll.scrollHeight - chatScroll.clientHeight - chatScroll.scrollTop < 50; });
+setInterval(() => { loadAgents(); }, 5000);
+
+// ---------- agent sidebar ----------
+const NARROW_MAX = 900;
+let sidebarOpen = window.innerWidth > NARROW_MAX, wasNarrow = window.innerWidth <= NARROW_MAX;
+function applySidebar() {
+    const narrow = window.innerWidth <= NARROW_MAX;
+    document.body.classList.toggle('agent-sidebar-open', sidebarOpen);
+    $('agentSidebarBackdrop').classList.toggle('show', narrow && sidebarOpen);
+}
+$('agentSidebarToggle').onclick = () => { sidebarOpen = !sidebarOpen; applySidebar(); };
+$('agentSidebarBackdrop').onclick = () => { sidebarOpen = false; applySidebar(); };
+window.addEventListener('resize', () => { const narrow = window.innerWidth <= NARROW_MAX; if (narrow && !wasNarrow) sidebarOpen = false; else if (!narrow && wasNarrow) sidebarOpen = true; wasNarrow = narrow; applySidebar(); });
+applySidebar();
+
+// ---------- theme ----------
+function setTheme(dark) { document.body.toggleAttribute('data-theme', dark); document.body.setAttribute('data-theme', dark ? 'dark' : 'light'); if (!dark) document.body.removeAttribute('data-theme'); const lbl = $('themeToggle').querySelector('.lbl'); lbl.textContent = dark ? 'Switch to Light Mode' : 'Switch to Dark Mode'; localStorage.setItem('theme', dark ? 'dark' : 'light'); }
+$('themeToggle').onclick = () => setTheme(document.body.getAttribute('data-theme') !== 'dark');
+if (localStorage.getItem('theme') === 'dark') setTheme(true);
+
+// ---------- panels ----------
+const filesPanel = $('filesPanel'), sidebar = $('sidebar'), commandPanel = $('commandPanel');
+function closePanels() { sidebar.classList.remove('visible'); commandPanel.classList.remove('visible'); filesPanel.classList.remove('visible'); }
+$('sidebarToggleBtn').onclick = () => { const was = sidebar.classList.contains('visible'); closePanels(); if (!was) sidebar.classList.add('visible'); };
+$('commandToggleBtn').onclick = () => { const was = commandPanel.classList.contains('visible'); closePanels(); if (!was) { commandPanel.classList.add('visible'); $('commandInput').focus(); } };
+$('filesToggleBtn').onclick = () => { const was = filesPanel.classList.contains('visible'); closePanels(); if (!was) { filesPanel.classList.add('visible'); loadFilesList(); } };
+
+// ---------- file manager ----------
+let selectedFile = null, filesModalCb = null, filesPathModalCb = null;
+let filesCwd = '.';
+async function resolveCwd() {
+    try { const d = await getJSON('/api/files/cwd?agent_id=' + encodeURIComponent(activeAgent || '')); if (d.path) return d.path; } catch (e) {}
+    return '.';
+}
+function joinPath(base, name) {
+    if (!base || base === '.') return name;
+    const b = base.replace(/[\\/]+$/, '');
+    if (/^[A-Za-z]:$/.test(b)) return b + '/' + name;
+    return b + '/' + name;
+}
+function parentPath(p) {
+    if (!p || p === '.' || p === '/') return p;
+    const trimmed = p.replace(/[\\/]+$/, '');
+    if (/^[A-Za-z]:$/.test(trimmed)) return trimmed + '/';
+    const i = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+    if (i < 0) return trimmed;
+    if (i === 0) return '/';
+    const parent = trimmed.slice(0, i);
+    return /^[A-Za-z]:$/.test(parent) ? parent + '/' : parent;
+}
+function formatSize(b) { if (b < 1024) return b + ' B'; if (b < 1048576) return (b / 1024).toFixed(1) + ' KB'; if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB'; return (b / 1073741824).toFixed(1) + ' GB'; }
+
+async function loadFilesList(path) {
+    if (path !== undefined) filesCwd = path;
+    else if (filesCwd === '.') filesCwd = await resolveCwd();
+    try {
+        const data = await getJSON(`/api/files/list?agent_id=${encodeURIComponent(activeAgent || '')}&path=${encodeURIComponent(filesCwd)}`);
+        if (data.error) { $('filesPathInput').value = 'Error: ' + data.error; return; }
+        filesCwd = data.path; $('filesPathInput').value = filesCwd;
+        const list = $('filesList'); list.innerHTML = ''; selectedFile = null;
+        if (!data.items || data.items.length === 0) { const e = document.createElement('div'); e.className = 'files-empty'; e.textContent = 'Empty directory'; list.appendChild(e); return; }
+        data.items.forEach(it => {
+            const row = document.createElement('div'); row.className = 'file-row';
+            const color = it.is_dir ? 'var(--warning)' : 'var(--text-3)';
+            row.innerHTML = `<span class="file-icon" style="color:${color}">${it.is_dir ? DIR_ICON : FILE_ICON}</span><span class="file-name"></span><span class="file-size">${it.is_dir ? '' : formatSize(it.size)}</span>`;
+            row.querySelector('.file-name').textContent = it.name;
+            row.onclick = () => { document.querySelectorAll('.file-row.selected').forEach(x => x.classList.remove('selected')); row.classList.add('selected'); selectedFile = it; };
+            row.ondblclick = () => { if (it.is_dir) loadFilesList(joinPath(filesCwd, it.name)); };
+            list.appendChild(row);
+        });
+    } catch (e) { $('filesPathInput').value = 'Error: ' + e.message; }
+}
+
+$('filesRefreshBtn').onclick = () => loadFilesList();
+$('filesParentBtn').onclick = () => loadFilesList(parentPath(filesCwd));
+$('filesAccessBtn').onclick = () => { const p = $('filesPathInput').value.trim(); if (p) loadFilesList(p); };
+$('filesPathInput').addEventListener('keypress', e => { if (e.key === 'Enter') $('filesAccessBtn').click(); });
+
+$('filesNewBtn').onclick = () => {
+    $('filesModalTitle').textContent = 'New';
+    $('filesModalInput').value = 'New';
+    document.querySelector('input[name="filesModalType"][value="file"]').checked = true;
+    filesModalCb = async () => {
+        const name = $('filesModalInput').value.trim() || 'New';
+        const type = document.querySelector('input[name="filesModalType"]:checked').value;
+        const path = joinPath(filesCwd, name);
+        await postJSON(type === 'file' ? '/api/files/new' : '/api/files/mkdir', { agent_id: activeAgent, path });
+        loadFilesList();
+    };
+    $('filesModal').classList.add('show'); $('filesModalInput').focus(); $('filesModalInput').select();
+};
+$('filesModalCancel').onclick = () => $('filesModal').classList.remove('show');
+$('filesModalConfirm').onclick = () => { if (filesModalCb) filesModalCb(); $('filesModal').classList.remove('show'); };
+$('filesModalInput').addEventListener('keypress', e => { if (e.key === 'Enter') $('filesModalConfirm').click(); });
+
+$('filesDeleteBtn').onclick = async () => {
+    if (!selectedFile) { showToast('Select a file first', true); return; }
+    if (!confirm(`Delete "${selectedFile.name}"?`)) return;
+    const r = await postJSON('/api/files/delete', { agent_id: activeAgent, path: joinPath(filesCwd, selectedFile.name) });
+    if (r.error) showToast(r.error, true); else { showToast('Deleted'); loadFilesList(); }
+};
+$('filesUploadBtn').onclick = () => $('filesUploadInput').click();
+$('filesUploadInput').onchange = async () => {
+    const f = $('filesUploadInput').files[0]; if (!f) return;
+    const fd = new FormData(); fd.append('agent_id', activeAgent || ''); fd.append('dest', joinPath(filesCwd, f.name)); fd.append('file', f);
+    try { const r = await (await fetch('/api/files/upload', { method: 'POST', body: fd })).json(); if (r.error) showToast(r.error, true); else { addMessage(r.result, 'system'); showToast('Uploaded: ' + f.name); loadFilesList(); } } catch (e) { showToast(e.message, true); }
+    $('filesUploadInput').value = '';
+};
+$('filesDownloadBtn').onclick = () => {
+    if (!selectedFile || selectedFile.is_dir) { showToast('Select a file first', true); return; }
+    const p = joinPath(filesCwd, selectedFile.name);
+    window.location.href = `/api/files/download?agent_id=${encodeURIComponent(activeAgent || '')}&path=${encodeURIComponent(p)}`;
+};
+function openPathModal(title, value, cb) { $('filesPathModalTitle').textContent = title; $('filesPathModalInput').value = value; filesPathModalCb = cb; $('filesPathModal').classList.add('show'); $('filesPathModalInput').focus(); $('filesPathModalInput').select(); }
+$('filesCopyBtn').onclick = () => { if (!selectedFile) { showToast('Select a file first', true); return; } const src = joinPath(filesCwd, selectedFile.name); openPathModal('Copy: ' + selectedFile.name, src, async (dest) => { if (!dest) return; const r = await postJSON('/api/files/copy', { agent_id: activeAgent, src, dest }); if (r.error) showToast(r.error, true); else loadFilesList(); }); };
+$('filesMoveBtn').onclick = () => { if (!selectedFile) { showToast('Select a file first', true); return; } const src = joinPath(filesCwd, selectedFile.name); openPathModal('Move: ' + selectedFile.name, src, async (dest) => { if (!dest) return; const r = await postJSON('/api/files/move', { agent_id: activeAgent, src, dest }); if (r.error) showToast(r.error, true); else loadFilesList(); }); };
+$('filesPathModalCancel').onclick = () => $('filesPathModal').classList.remove('show');
+$('filesPathModalConfirm').onclick = () => { const v = $('filesPathModalInput').value.trim(); if (filesPathModalCb) filesPathModalCb(v); $('filesPathModal').classList.remove('show'); };
+$('filesPathModalInput').addEventListener('keypress', e => { if (e.key === 'Enter') $('filesPathModalConfirm').click(); });
+
+// ---------- direct command ----------
+async function sendDirectCommand() {
+    const cmd = $('commandInput').value.trim(); if (!cmd) return;
+    addMessage(cmd, 'user'); $('commandInput').value = ''; $('commandExecuteBtn').disabled = true;
+    try {
+        const r = await postJSON('/api/exec-cmd', { agent_id: activeAgent, command: cmd });
+        addMessage(r.error ? `[exec_cmd] [${cmd}]\nError: ${r.error}` : `[exec_cmd] [${cmd}]\n${r.result}`, 'result');
+    } catch (e) { addMessage('Error: ' + e.message, 'system'); }
+    $('commandExecuteBtn').disabled = false;
+}
+$('commandExecuteBtn').onclick = sendDirectCommand;
+$('commandInput').addEventListener('keypress', e => { if (e.key === 'Enter') sendDirectCommand(); });
+
+// init
+loadConfig();
+</script>
+</body>
+</html>
