@@ -25,6 +25,6 @@ echo ^>^> control    %GOOS%/%GOARCH%
 go build -trimpath -tags "%TAGS%" -ldflags "%LDFLAGS%" -o "dist\control\c2agent_%GOOS%_%GOARCH%%EXT%" ./cmd/c2agent || exit /b 1
 echo ^>^> remote-go  %GOOS%/%GOARCH%
 pushd remote\remote-go
-go build -trimpath -tags "%TAGS%" -ldflags "%LDFLAGS%" -o "..\..\dist\remote-go\irudo_remote_%GOOS%_%GOARCH%%EXT%" . || (popd & exit /b 1)
+go build -trimpath -tags "%TAGS%" -ldflags "%LDFLAGS%" -o "..\..\dist\remote-go\c2a_remote_%GOOS%_%GOARCH%%EXT%" . || (popd & exit /b 1)
 popd
 goto :eof

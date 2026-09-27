@@ -23,7 +23,7 @@ build() {
 
   echo ">> remote-go  $goos/$goarch"
   ( cd "$ROOT/$REMOTE_DIR" && GOOS="$goos" GOARCH="$goarch" go build -trimpath -tags "$TAGS" -ldflags "$LDFLAGS" \
-      -o "$ROOT/$OUT/remote-go/irudo_remote_${goos}_${goarch}${ext}" . )
+      -o "$ROOT/$OUT/remote-go/c2a_remote_${goos}_${goarch}${ext}" . )
 }
 
 # Requested targets
