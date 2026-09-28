@@ -1,0 +1,290 @@
+remote/remote-py/local_executor.py
+  s_b085fdc6b6462f::t_805133eb53c349 106-107,109-112
+  s_b085fdc6b6462f::t_3d0fdfc7aff8a8 144-145,147-149
+  s_b085fdc6b6462f::t_d09b28a38ab4b8 101,108
+  s_b085fdc6b6462f::t_e7896c7cc68eca 146,150
+  s_b085fdc6b6462f::t_6681c2b8f8c88c 203-223,228
+  s_b085fdc6b6462f::t_3b265d33cf5f62 265
+  s_b085fdc6b6462f::t_f699ec4e15f872 261
+  s_b085fdc6b6462f::t_e036d485bbc797 62,67-69
+  s_b085fdc6b6462f::t_780f31c499eaa9 8
+remote/remote-c/actions.c
+  s_b085fdc6b6462f::t_89ee6bcb1a0e81 12,28,30,75,82,242,261,276,289,384,515,552,560
+  s_b085fdc6b6462f::t_3688a029031bbe 150,157-161,165-166
+  s_b085fdc6b6462f::t_c80ac06de94ed8 309-310
+  s_b085fdc6b6462f::t_a3cdbdb524c840 341-351
+  s_b085fdc6b6462f::t_be2b26864cf1fa 435-442
+  s_b085fdc6b6462f::t_eb0fca39dfb8a8 61,69,73-74,76-77,83
+  s_b085fdc6b6462f::t_d8eeb195ba104b 553-559,561
+  s_b085fdc6b6462f::t_5a26e350f2fc32 576-577
+  s_b085fdc6b6462f::t_3fac487b09e179 353-360
+  s_b085fdc6b6462f::t_e0715ecb9123db 267,271-273
+  s_b085fdc6b6462f::t_c16720b3a47d3d 135,210
+config_c2.example.json
+  s_b085fdc6b6462f::t_1b79740ab3f38c 35
+remote/remote-go/main.go
+  s_b085fdc6b6462f::t_a907d15db578dd 342-361,374,411
+  s_b085fdc6b6462f::t_2cf1f4b84c080d 103
+  s_b085fdc6b6462f::t_d2bf299fdbdcf0 1
+  s_b085fdc6b6462f::t_2ee5940b80cf47 89
+  s_b085fdc6b6462f::t_f902ab70fe57e5 154-159
+  s_b085fdc6b6462f::t_955a38cdae1efa 268-276
+build/build_all.bat
+  s_b085fdc6b6462f::t_81907c7f64ef8f 33
+  s_b085fdc6b6462f::t_8ca6acd5f6627a 13-17
+internal/agent/shell/shellcmd.go
+  s_b085fdc6b6462f::t_b4f31a958a2484 222-224
+  s_b085fdc6b6462f::t_ee6f69e6e7e72f 232-236,241,243
+  s_b085fdc6b6462f::t_d9804d7e27de7b 190
+  s_b085fdc6b6462f::t_e39ec826957fd3 397-408
+  s_b085fdc6b6462f::t_8553a2ca955483 128-138
+  s_b085fdc6b6462f::t_5f6abbf2cf9424 422
+  s_b085fdc6b6462f::t_94fb49687cb7eb 42,421,423-424,432-433,435
+  s_b085fdc6b6462f::t_a2a4913cda88ce 228-230
+  s_b085fdc6b6462f::t_e69c5aa5a342eb 34-35,40-41
+  s_b085fdc6b6462f::t_9399a6b25f34af 409-412
+  s_b085fdc6b6462f::t_47ead0e423f270 177-178,180-181
+  s_b085fdc6b6462f::t_6fb7c2cffa84d2 187-189
+  s_b085fdc6b6462f::t_fa51381ce841c3 9
+  s_b085fdc6b6462f::t_4c31e594283c6a 208-210
+  s_b085fdc6b6462f::t_abb6089dd762e7 78-81
+  s_b085fdc6b6462f::t_b946d2c5b16033 16-17
+remote/remote-go/go.mod
+  s_b085fdc6b6462f::t_3a412bc162e134 1
+internal/agent/registry.go
+  s_b085fdc6b6462f::t_1b4f0019754fce 67-69
+  s_b085fdc6b6462f::t_b036f3d39bc42a 16,24-28
+  s_b085fdc6b6462f::t_3dafb778e31e67 63
+  s_b085fdc6b6462f::t_2442c66dfce2ae 29-30
+remote/remote-go/actions.go
+  s_b085fdc6b6462f::t_663bbfc582abe6 33-36
+  s_b085fdc6b6462f::t_85cc71a374fb09 183-188
+  s_b085fdc6b6462f::t_af54931479119b 13,141
+  s_b085fdc6b6462f::t_cc0a732e07c995 127-129,135-140
+internal/crypto/chacha20_test.go
+  s_b085fdc6b6462f::t_31aeec492b15f7 69-70
+internal/command/command_test.go
+  s_b085fdc6b6462f::t_2cb0290a7761c3 1-56
+remote/remote-py/handler.py
+  s_b085fdc6b6462f::t_63b968c55a1701 17,62,229
+  s_b085fdc6b6462f::t_32227de4a8afe6 52,59-61
+  s_b085fdc6b6462f::t_fea7f1a2cd9be3 180,197-198,200,212,216-228
+remote/remote-c/COMPILE.txt
+  s_b085fdc6b6462f::t_1120b96d00c320 76
+  s_b085fdc6b6462f::t_53141eb9fc0e40 71-73
+  s_b085fdc6b6462f::t_1c16fc88f41ba4 21,23,27,33,35,45,55
+README.md
+  s_b085fdc6b6462f::t_6b5db8952b9943 508-509
+  s_b085fdc6b6462f::t_3e01a63fe411d1 583-584
+  s_b085fdc6b6462f::t_0399b9c8d26842 294-295
+  s_b085fdc6b6462f::t_16aa0a867e58b8 144,146,163-164,167,180-184,203,205,428,430,448-449,452,466-470,490,492
+  s_b085fdc6b6462f::t_1af1857f52d1a8 221-222
+internal/cli/cli.go
+  s_b085fdc6b6462f::t_2f2dbc2ab3b941 323-325
+  s_b085fdc6b6462f::t_cdecb9d91e1434 286,293-301
+  s_b085fdc6b6462f::t_ba055616313dda 315-317
+  s_b085fdc6b6462f::t_e4f73814a5da54 184
+  s_b085fdc6b6462f::t_0deabac34c7ae6 321
+  s_b085fdc6b6462f::t_4bd07da2feceaa 312-314
+internal/agent/native/server.go
+  s_b085fdc6b6462f::t_63d1d5a3a8163c 98-100
+  s_b085fdc6b6462f::t_576a22a6fda892 194-199
+remote/remote-go/README.md
+  s_b085fdc6b6462f::t_d1a195816725fe 3,14,17-20,26,51
+  s_b085fdc6b6462f::t_0ae9dc82b55202 73-79
+  s_b085fdc6b6462f::t_2d7bf4efc2fdb1 67
+internal/engine/events.go
+  s_b085fdc6b6462f::t_28d1b20f18375d 77,80,82,85-93
+  s_b085fdc6b6462f::t_e2343d039f7fb1 18-19,94
+  s_b085fdc6b6462f::t_83250049891b76 51-52,54,62-66,81
+  s_b085fdc6b6462f::t_db08074cbfef02 3-11
+  s_b085fdc6b6462f::t_14bc18bca067ef 34,45-47
+cmd/c2agent/main.go
+  s_b085fdc6b6462f::t_81aa788dcf1a19 80-82,87-96,98-100,102-111
+  s_b085fdc6b6462f::t_5e5d1eeebd9547 7,10,12-13
+internal/engine/engine.go
+  s_b085fdc6b6462f::t_2f4cf6c96e9fcd 36
+  s_b085fdc6b6462f::t_7ce6748fc4600f 90-94,116-117,119-127,129
+  s_b085fdc6b6462f::t_70d6cd7dfc143f 49-62
+  s_b085fdc6b6462f::t_c1875bd0730628 176-180
+  s_b085fdc6b6462f::t_66a9085949fc87 282-285,287-289,291,293-295
+  s_b085fdc6b6462f::t_0ee1e6b33d621d 328-329,344
+  s_b085fdc6b6462f::t_b561379e735016 260-264
+  s_b085fdc6b6462f::t_42e7ef645a6feb 187-195
+  s_b085fdc6b6462f::t_106fc059731eb3 411-412,416-420,422-427
+  s_b085fdc6b6462f::t_137cd0652553c7 134-135,141-142,153-154
+  s_b085fdc6b6462f::t_bf3a41eeca8039 278-281,286,290,292
+  s_b085fdc6b6462f::t_526d8a22c4ba6e 219
+  s_b085fdc6b6462f::t_4d01f68d923e51 393-395,397
+  s_b085fdc6b6462f::t_882322f3bf6fe4 413-415,421,428
+design.md
+  s_b085fdc6b6462f::t_3fbb27faf3471f 899
+  s_b085fdc6b6462f::t_5fc216383bd2f9 28,211,213-214
+  s_b085fdc6b6462f::t_925c6056957c67 638
+  s_b085fdc6b6462f::t_9c0e4e463124d7 1009,1011
+  s_b085fdc6b6462f::t_c0c39e3973fba8 15
+  s_b085fdc6b6462f::t_31fb1d766d97e9 893
+remote/remote-c/main.c
+  s_b085fdc6b6462f::t_82583d0b2a1045 594-598,609,624,627-629
+  s_b085fdc6b6462f::t_b26f1ef6d20f6a 578-579
+  s_b085fdc6b6462f::t_48af8345021a2b 389
+  s_b085fdc6b6462f::t_7f17ed7a7d1893 367-383,398
+  s_b085fdc6b6462f::t_63a6a84b2c685f 425
+  s_b085fdc6b6462f::t_febd08a2e4e9eb 84,395,429,460
+  s_b085fdc6b6462f::t_8a37ffde7d451d 639
+  s_b085fdc6b6462f::t_4ce5f13cc39167 441,522
+  s_b085fdc6b6462f::t_c2c6e1d6cb08cb 86,146,151,162,183,294,298,317,517,606,612,622,634,637,701-702,708
+  s_b085fdc6b6462f::t_80e999bc17b6e9 430
+  s_b085fdc6b6462f::t_4eaa851938bbe2 536,545
+  s_b085fdc6b6462f::t_684d5640954371 227-243
+  s_b085fdc6b6462f::t_5c3d16315efe7d 431
+internal/engine/session.go
+  s_b085fdc6b6462f::t_317e109afd2353 396
+  s_b085fdc6b6462f::t_163aa84b4ba458 190,196-197,199,203,206-207
+  s_b085fdc6b6462f::t_bb8ae92b3eda83 333
+  s_b085fdc6b6462f::t_fead509d9d713f 313-315,326
+  s_b085fdc6b6462f::t_39544f80cf783c 51,59,62,65-66,68
+  s_b085fdc6b6462f::t_d157ce4d2390fa 390,397-398,400,405,408-409,411
+  s_b085fdc6b6462f::t_bab266f39b7029 123-124,170,236,242
+  s_b085fdc6b6462f::t_41766657f6be10 88,104,108-122
+  s_b085fdc6b6462f::t_897695b06f27cc 338-340,342-344
+  s_b085fdc6b6462f::t_0665fc990a7901 163-165,168-169
+  s_b085fdc6b6462f::t_58e5564eccd6dd 222,227-230,237-238,243-244,249-250
+  s_b085fdc6b6462f::t_96540697a5fba7 263,272-275,285,289,299,306-307,334-335,341,345,348-349
+  s_b085fdc6b6462f::t_e8ec49e2ebf69d 305
+  s_b085fdc6b6462f::t_e8c5a3bcad8052 166-167
+  s_b085fdc6b6462f::t_6552bcba820823 131-145
+  s_b085fdc6b6462f::t_2a56e4d9127c7e 365,367-368,375-378
+  s_b085fdc6b6462f::t_6c6a64ea42461d 316-325
+  s_b085fdc6b6462f::t_3d2598d796686f 176
+  s_b085fdc6b6462f::t_cc94ab0def9052 81-87,89-91,98-99
+  s_b085fdc6b6462f::t_64656df7e056b5 21
+internal/protocol/codec.go
+  s_b085fdc6b6462f::t_cdcfcfdfe5cd88 61,63,66-67
+remote/common/protocol.py
+  s_b085fdc6b6462f::t_a3977c8d5a7dbf 159-160
+  s_b085fdc6b6462f::t_e94cb4d73b2b5d 27
+internal/engine/engine_test.go
+  s_b085fdc6b6462f::t_3d73dd0bf6e58d 38,43-51
+  s_b085fdc6b6462f::t_43f49371f4fa40 33,246,300
+  s_b085fdc6b6462f::t_0cbf91638f79b2 226-245,247-259,275-280,330-333
+  s_b085fdc6b6462f::t_3fb88333f22abc 260-264,266-274,281-299,301-329
+  s_b085fdc6b6462f::t_65beaf5534240a 265
+internal/llm/client.go
+  s_b085fdc6b6462f::t_18b69afd28dad5 118-121,136-143,146-147
+internal/agent/shell/backend.go
+  s_b085fdc6b6462f::t_76c12e469d44f9 81
+  s_b085fdc6b6462f::t_cf6b1f57186786 86-89
+  s_b085fdc6b6462f::t_a858a28a3034ab 185-188
+  s_b085fdc6b6462f::t_0a660a2f2264e9 233
+  s_b085fdc6b6462f::t_ce3d0ae5609349 23,42-43,96-97
+  s_b085fdc6b6462f::t_3a57952dc05830 90-94
+  s_b085fdc6b6462f::t_a6e169a929d9ac 302-306
+  s_b085fdc6b6462f::t_fdad28df684b18 95
+  s_b085fdc6b6462f::t_465702d43a2cc2 145,148-151
+  s_b085fdc6b6462f::t_7038bc3933ee0c 59-60,71
+internal/web/server.go
+  s_b085fdc6b6462f::t_12851b0cb296cb 33,69-74
+  s_b085fdc6b6462f::t_adbfd8297b47d1 11,13
+  s_b085fdc6b6462f::t_4d03431e3ee1f4 532
+  s_b085fdc6b6462f::t_73dfc29d5cb177 6,65-66,324,465-466
+  s_b085fdc6b6462f::t_fa740972e72702 40,43,48
+  s_b085fdc6b6462f::t_e8100ba25bea20 496-511
+  s_b085fdc6b6462f::t_0425c5ebbc2a1c 17
+  s_b085fdc6b6462f::t_d9552daa1e2d21 41-42,44-47,52-64
+  s_b085fdc6b6462f::t_dbe8757c3ab0af 179-180
+  s_b085fdc6b6462f::t_6b69b2256b83aa 306,321-323
+  s_b085fdc6b6462f::t_506753ef5a4aab 418
+  s_b085fdc6b6462f::t_dda6e8f31727bc 449-452,456-464
+internal/config/config.go
+  s_b085fdc6b6462f::t_6686303ca19713 192-195
+  s_b085fdc6b6462f::t_a0722f338f80d8 88
+  s_b085fdc6b6462f::t_5462f3dc46b0af 132,188-191,196,199,205-207,253-254
+  s_b085fdc6b6462f::t_c2704e3a80a0bf 197
+  s_b085fdc6b6462f::t_2799800bc1c8c6 245-252
+remote/remote-c/agent.h
+  s_b085fdc6b6462f::t_a98e802d51d7f4 85,87
+  s_b085fdc6b6462f::t_ecbcaad97a52c5 166-171
+  s_b085fdc6b6462f::t_33ae5805f6b048 50-51
+  s_b085fdc6b6462f::t_9d9b7b5a490ba7 23
+  s_b085fdc6b6462f::t_fbb0d91846a70c 193
+remote/remote-c/protocol.c
+  s_b085fdc6b6462f::t_c5e8088239e768 101
+  s_b085fdc6b6462f::t_ebca66d510ba4d 304,436,449,460,471,484,495
+  s_b085fdc6b6462f::t_2db77417237db4 140,145-146
+internal/agent/shell/server.go
+  s_b085fdc6b6462f::t_d48e635dcc522a 158-159
+  s_b085fdc6b6462f::t_dd5f08f8baca49 116
+  s_b085fdc6b6462f::t_42fb261f529814 100-102
+internal/agent/native/backend.go
+  s_b085fdc6b6462f::t_25aa0e25945c0e 225
+  s_b085fdc6b6462f::t_95bb748f46caa1 139-141
+  s_b085fdc6b6462f::t_6661f301be3e81 95-97
+build/build_all.sh
+  s_b085fdc6b6462f::t_bf47235d210d97 31
+  s_b085fdc6b6462f::t_09f7ccd272bd47 18-22
+remote/remote-py/file_transfer.py
+  s_b085fdc6b6462f::t_a8d537bb0de7b1 35
+remote/remote-go/exec.go
+  s_b085fdc6b6462f::t_3bf9b45e5aefdf 31-34
+remote/remote-go/exec_other.go
+  s_b085fdc6b6462f::t_c7e64a7044429f 1-7
+internal/web/ui/index.html
+  s_b085fdc6b6462f::t_4205a89a9777b4 547
+  s_b085fdc6b6462f::t_e5a07e8919804d 610-613,615-616
+  s_b085fdc6b6462f::t_6f62f8c81e77f3 679-684
+  s_b085fdc6b6462f::t_612e1daae3e0e2 365-374
+  s_b085fdc6b6462f::t_aea197e7cac617 395
+  s_b085fdc6b6462f::t_11341f9886883d 520-523,528,531-543
+  s_b085fdc6b6462f::t_2472f0c90a1b32 561-566,569
+  s_b085fdc6b6462f::t_091e4bae468048 530
+  s_b085fdc6b6462f::t_1ad490c08f22b6 579
+  s_b085fdc6b6462f::t_401b409a57c0c7 619
+  s_b085fdc6b6462f::t_9706d532cd2af2 662
+  s_b085fdc6b6462f::t_647e82ae99b35a 103-104
+  s_b085fdc6b6462f::t_8e230a1e321633 599-602
+  s_b085fdc6b6462f::t_d94762203c7e78 701
+  s_b085fdc6b6462f::t_9165225a40dfc5 346
+  s_b085fdc6b6462f::t_72496394120e78 591-598
+  s_b085fdc6b6462f::t_58dc4f16a5bc60 719-721,725-726,731
+  s_b085fdc6b6462f::t_f29eb33fbbeded 786
+  s_b085fdc6b6462f::t_81e2f9feee1afd 581
+remote/remote-py/agent_client.py
+  s_b085fdc6b6462f::t_8df91ca06ceb75 75-76
+  s_b085fdc6b6462f::t_c7faa9cad9a03d 62-63
+internal/agent/agent.go
+  s_b085fdc6b6462f::t_2ab3d052f117a2 160-165
+  s_b085fdc6b6462f::t_c7700858a6f6e6 11
+  s_b085fdc6b6462f::t_9327b800dfe867 51-60
+  s_b085fdc6b6462f::t_7f0aa568451902 153-157
+remote/remote-go/protocol.go
+  s_b085fdc6b6462f::t_e2cb70553be78e 175-176
+internal/command/command.go
+  s_b085fdc6b6462f::t_5b2db72c404a28 123-125,128-129,135-136,138
+internal/agent/queue.go
+  s_b085fdc6b6462f::t_b53d59a43a38c5 5
+  s_b085fdc6b6462f::t_dba34c5b404fac 119-121
+.gitattributes
+  s_b085fdc6b6462f::t_d4c7dfe2f2e528 3-13
+remote/remote-go/exec_windows.go
+  s_b085fdc6b6462f::t_cc83419ed1c4e4 1-82
+internal/config/config_test.go
+  s_b085fdc6b6462f::t_634dc219f37ca0 3-7
+  s_b085fdc6b6462f::t_74f759191881bc 45-74
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "65d01eab9a8a361589a5aee552067a5c84f5c651",
+  "prompts": {},
+  "sessions": {
+    "s_b085fdc6b6462f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f1a535c5dffeL9ZzvGzMQH85wp",
+        "model": "unknown"
+      },
+      "human_author": "VantIer <vantler@live.cn>"
+    }
+  }
+}
