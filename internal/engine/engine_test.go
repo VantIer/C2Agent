@@ -331,6 +331,57 @@ func TestAgentOfflineEmitsAgentError(t *testing.T) {
 	}
 }
 
+// The persisted transcript must include the action's parameter detail (as the
+// live web view does), otherwise a page refresh drops the "[command]" part.
+func TestTranscriptIncludesActionParams(t *testing.T) {
+	br := &fakeBackend{}
+	reg := newTestAgent(t, br)
+	cfg := config.Default()
+	cfg.Policy.AuthMode = 2
+	cfg.Policy.RoundLimit = 5
+	el := &fakeLLM{turns: []*llm.ChatResult{
+		toolTurn("", "c1", "exec_cmd", `{"command":"echo \"hi there\""}`),
+		{Content: "done", Raw: llm.AssistantMessage("done", nil)},
+	}}
+	eng := NewWithClient(cfg, reg, el)
+	s, err := eng.NewSession("a1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.BeginChat(s.ID, "go"); err != nil {
+		t.Fatal(err)
+	}
+	waitIdle(t, eng, s.ID)
+
+	found := false
+	for _, tr := range eng.GetTranscript(s.ID) {
+		if tr.Role == "result" && strings.Contains(tr.Text, `[exec_cmd] [echo "hi there"]`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("transcript result does not include the action params: %+v", eng.GetTranscript(s.ID))
+	}
+}
+
+// Stopping a turn must persist both the partial assistant text and a stop
+// marker, so a refresh replays exactly what the live stream showed.
+func TestStopPersistsMarkerAndPartial(t *testing.T) {
+	eng := NewWithClient(config.Default(), agent.NewRegistry(), &fakeLLM{})
+	s := &Session{ID: "s1", AgentID: "a1", phase: PhaseLLM, text: "half an answer"}
+	eng.markStopped(s)
+	tr := s.transcriptCopy()
+	if len(tr) != 2 {
+		t.Fatalf("expected 2 transcript entries, got %d: %+v", len(tr), tr)
+	}
+	if tr[0].Role != "assistant" || tr[0].Text != "half an answer" {
+		t.Fatalf("partial assistant text not persisted: %+v", tr[0])
+	}
+	if tr[1].Role != "system" || tr[1].Text != "[Stopped by user]" {
+		t.Fatalf("stop marker not persisted: %+v", tr[1])
+	}
+}
+
 // A disconnected agent must not take its sessions down: they are kept so a
 // reconnect with the same id can resume them (session resilience).
 func TestSessionsSurviveAgentDisconnect(t *testing.T) {

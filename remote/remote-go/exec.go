@@ -5,8 +5,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 )
@@ -18,12 +16,7 @@ func runCmd(command string, timeout time.Duration) string {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "cmd", "/C", command)
-	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", command)
-	}
+	cmd := shellCmd(ctx, command)
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Sprintf("Error: Command timed out after %d seconds", int(timeout.Seconds()))

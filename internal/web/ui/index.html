@@ -86,9 +86,11 @@
         .btn.small svg { width: 14px; height: 14px; }
         .btn:disabled { opacity: .5; cursor: not-allowed; }
 
-        .command-panel { height: 0; overflow: hidden; background: var(--surface); border-bottom: 1px solid var(--border); transition: height .25s ease, margin-left .28s ease; flex-shrink: 0; }
-        .command-panel.visible { height: 64px; }
+        .command-panel { height: 0; overflow: hidden; background: var(--surface); border-bottom: 1px solid var(--border); transition: margin-left .28s ease; flex-shrink: 0; }
+        .command-panel.visible { height: auto; max-height: 46vh; overflow-y: auto; }
         .command-panel-inner { display: flex; align-items: stretch; gap: 10px; padding: 12px 20px; }
+        .command-output { display: none; margin: 0 20px 12px; padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.5; color: var(--text-2); white-space: pre-wrap; word-break: break-all; max-height: 30vh; overflow-y: auto; }
+        .command-output.show { display: block; }
         .command-input-wrap { flex: 1; display: flex; align-items: center; gap: 8px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 0 12px; }
         .command-input-wrap:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
         .command-input-wrap svg { width: 15px; height: 15px; color: var(--text-3); flex-shrink: 0; }
@@ -241,6 +243,7 @@
             </div>
             <button class="btn primary" id="commandExecuteBtn">Execute</button>
         </div>
+        <pre class="command-output" id="commandOutput"></pre>
     </div>
 
     <div class="main">
@@ -393,6 +396,7 @@ function addMessage(content, type) {
     }
     chatBox.appendChild(div);
     if (autoScroll) scrollToBottom();
+    return div;
 }
 
 const typing = document.createElement('div');
@@ -453,6 +457,7 @@ async function switchAgent(id) {
     await postJSON('/api/agents/switch', { agent_id: id });
     renderGen++; lastActiveId = id; activeAgent = id; activeSession = null;
     closeStream(); clearChat();
+    $('commandOutput').classList.remove('show'); $('commandOutput').textContent = '';
     filesCwd = '.';
     await loadAgents();
     await loadSessions();
@@ -568,7 +573,7 @@ function handleEvent(ev) {
         case 'snapshot':
             if (ev.snapshot) { appliedSeq = ev.snapshot.seq || 0; renderSnapshot(ev.snapshot); }
             if (ev.snapshot && ev.snapshot.running) { conversationActive = true; setSendStop(); setTyping('AI is thinking...', true); }
-            if (ev.snapshot && ev.snapshot.pending) showAuth(ev.snapshot.pending.action, ev.snapshot.pending.params);
+            if (ev.snapshot && ev.snapshot.pending) showAuth(ev.snapshot.pending.action, ev.snapshot.pending.params); else hideAuth();
             break;
         case 'idle': conversationActive = false; setSendIdle(); break;
         case 'answering':
@@ -581,7 +586,7 @@ function handleEvent(ev) {
         case 'auth_required': setTyping('', false); showAuth(ev.action, ev.params); break;
         case 'executing': setTyping('Executing...', true); break;
         case 'execution_done':
-            setTyping('', false); aiSpan = null;
+            setTyping('', false); aiSpan = null; hideAuth();
             {
                 const p = ev.params || {};
                 const detail = p.command ? ` [${p.command}]` : (p.path ? ` [${p.path}]` : '');
@@ -589,7 +594,7 @@ function handleEvent(ev) {
             }
             break;
         case 'execution_error':
-            setTyping('', false); aiSpan = null;
+            setTyping('', false); aiSpan = null; hideAuth();
             {
                 const p = ev.params || {};
                 const detail = p.command ? ` [${p.command}]` : (p.path ? ` [${p.path}]` : '');
@@ -597,26 +602,27 @@ function handleEvent(ev) {
             }
             break;
         case 'agent_error':
-            setTyping('', false); aiSpan = null;
+            setTyping('', false); aiSpan = null; hideAuth();
             addMessage(`Error: ${ev.error}`, 'result');
             break;
         case 'execution_denied':
-            setTyping('', false); aiSpan = null;
+            setTyping('', false); aiSpan = null; hideAuth();
             addMessage(`Denied: ${ev.action} (not executed)`, 'system');
             break;
         case 'stopped':
-            ensureAiBlock(); aiSpan.textContent += '\n[Stopped by user]'; setTyping('', false);
+            setTyping('', false); aiSpan = null; hideAuth();
+            addMessage('[Stopped by user]', 'system');
             conversationActive = false; setSendIdle(); break;
         case 'llm_error':
-            setTyping('', false); aiSpan = null;
+            setTyping('', false); aiSpan = null; hideAuth();
             addMessage(`[LLM Error] ${ev.error}`, 'system');
             conversationActive = false; setSendIdle(); break;
         case 'error':
-            setTyping('', false); aiSpan = null;
+            setTyping('', false); aiSpan = null; hideAuth();
             addMessage(`[Error] ${ev.error}`, 'system');
             conversationActive = false; setSendIdle(); break;
         case 'done':
-            conversationActive = false; setSendIdle(); setTyping('', false);
+            conversationActive = false; setSendIdle(); setTyping('', false); hideAuth();
             loadSessions();
             break;
     }
@@ -636,15 +642,24 @@ async function sendMessage() {
         if (!activeSession) { showToast('Failed to create a session', true); return; }
     }
     autoScroll = true;
-    addMessage(msg, 'user');
+    const userNode = addMessage(msg, 'user');
     messageInput.value = ''; messageInput.style.height = 'auto';
     conversationActive = true; setSendStop(); setTyping('AI is thinking...', true);
     aiSpan = null;
     try {
         const r = await postJSON('/api/send', { session_id: activeSession, message: msg });
-        if (r.error) { addMessage(r.error, 'system'); conversationActive = false; setSendIdle(); setTyping('', false); }
-        else if (r.session_id && r.session_id !== activeSession) activateSession(r.session_id);
-    } catch (e) { addMessage('Error: ' + e.message, 'system'); conversationActive = false; setSendIdle(); }
+        if (r.error) {
+            userNode.remove();
+            showToast(r.error, true);
+            conversationActive = false; setSendIdle(); setTyping('', false);
+        } else if (r.session_id && r.session_id !== activeSession) {
+            activateSession(r.session_id);
+        }
+    } catch (e) {
+        userNode.remove();
+        showToast('Error: ' + e.message, true);
+        conversationActive = false; setSendIdle();
+    }
     loadSessions();
 }
 
@@ -659,21 +674,22 @@ function showAuth(action, params) {
     item.append(a, p); box.appendChild(item);
     $('cmdModal').classList.add('show');
 }
-async function submitAuth(ok) { $('cmdModal').classList.remove('show'); await postJSON('/api/authorize-execute', { session_id: activeSession, authorized: ok }); }
+function hideAuth() { $('cmdModal').classList.remove('show'); }
+async function submitAuth(ok) { hideAuth(); await postJSON('/api/authorize-execute', { session_id: activeSession, authorized: ok }); }
 
 // ---------- events ----------
 sendBtn.onclick = () => { if (conversationActive) requestStop(); else sendMessage(); };
 messageInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
 messageInput.addEventListener('input', () => { messageInput.style.height = 'auto'; messageInput.style.height = Math.min(messageInput.scrollHeight, 140) + 'px'; });
-$('modalDeny').onclick = () => { addMessage('Command execution denied by user.', 'system'); submitAuth(false); };
+$('modalDeny').onclick = () => submitAuth(false);
 $('modalAuthorize').onclick = () => submitAuth(true);
 $('newSessionBtn').onclick = newSession;
 $('authSegmented').addEventListener('click', async (e) => { const b = e.target.closest('.auth-seg'); if (!b) return; await postJSON('/api/set-auth', { mode: Number(b.dataset.mode) }); loadConfig(); });
-$('resetBtn').onclick = async () => { if (!activeSession) return; await postJSON('/api/reset', { session_id: activeSession }); clearChat(); addMessage('Session reset.', 'system'); };
+$('resetBtn').onclick = async () => { if (!activeSession) return; const r = await postJSON('/api/reset', { session_id: activeSession }); if (r.success) { clearChat(); showToast('Session reset'); } else { showToast('Reset failed', true); } };
 $('shutdownBtn').onclick = async () => {
     if (!confirm('Shut down the active agent?')) return;
     const r = await postJSON('/api/shutdown', { agent_id: activeAgent });
-    addMessage(r.success ? 'Shutdown command sent.' : ('Shutdown failed: ' + (r.error || 'unknown')), 'system');
+    showToast(r.success ? 'Shutdown command sent.' : ('Shutdown failed: ' + (r.error || 'unknown')), !r.success);
     loadAgents();
 };
 chatScroll.addEventListener('scroll', () => {
@@ -790,7 +806,7 @@ $('filesUploadBtn').onclick = () => $('filesUploadInput').click();
 $('filesUploadInput').onchange = async () => {
     const f = $('filesUploadInput').files[0]; if (!f) return;
     const fd = new FormData(); fd.append('agent_id', activeAgent || ''); fd.append('dest', joinPath(filesCwd, f.name)); fd.append('file', f);
-    try { const r = await (await fetch('/api/files/upload', { method: 'POST', body: fd })).json(); if (r.error) showToast(r.error, true); else { addMessage(r.result, 'system'); showToast('Uploaded: ' + f.name); loadFilesList(); } } catch (e) { showToast(e.message, true); }
+    try { const r = await (await fetch('/api/files/upload', { method: 'POST', body: fd })).json(); if (r.error) showToast(r.error, true); else { showToast('Uploaded: ' + f.name); loadFilesList(); } } catch (e) { showToast(e.message, true); }
     $('filesUploadInput').value = '';
 };
 $('filesDownloadBtn').onclick = () => {
@@ -808,11 +824,18 @@ $('filesPathModalInput').addEventListener('keypress', e => { if (e.key === 'Ente
 // ---------- direct command ----------
 async function sendDirectCommand() {
     const cmd = $('commandInput').value.trim(); if (!cmd) return;
-    addMessage(cmd, 'user'); $('commandInput').value = ''; $('commandExecuteBtn').disabled = true;
+    // Operator direct commands are not part of any session transcript, so their
+    // output is shown in the Command panel (not the conversation) to keep the
+    // chat area exactly equal to the persisted session history.
+    const out = $('commandOutput');
+    out.classList.add('show'); out.textContent = '$ ' + cmd + '\n(executing...)';
+    $('commandInput').value = ''; $('commandExecuteBtn').disabled = true;
     try {
         const r = await postJSON('/api/exec-cmd', { agent_id: activeAgent, command: cmd });
-        addMessage(r.error ? `[exec_cmd] [${cmd}]\nError: ${r.error}` : `[exec_cmd] [${cmd}]\n${r.result}`, 'result');
-    } catch (e) { addMessage('Error: ' + e.message, 'system'); }
+        out.textContent = '$ ' + cmd + '\n' + (r.error ? 'Error: ' + r.error : r.result);
+    } catch (e) {
+        out.textContent = '$ ' + cmd + '\nError: ' + e.message;
+    }
     $('commandExecuteBtn').disabled = false;
 }
 $('commandExecuteBtn').onclick = sendDirectCommand;

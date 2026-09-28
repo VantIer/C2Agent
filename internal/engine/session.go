@@ -150,14 +150,32 @@ func (s *Session) historyCopy() []llm.Message {
 	return out
 }
 
-// runConversation executes the tool-calling loop for one user message.
-func (e *Engine) runConversation(s *Session, message string) {
-	defer e.finish(s)
-
+// persistPartial moves any in-progress assistant text into the transcript, so
+// a refresh replays the same partial content the user already saw (used when a
+// turn ends abnormally: stop or LLM error).
+func (e *Engine) persistPartial(s *Session) {
 	s.mu.Lock()
-	s.history = append(s.history, llm.UserMessage(message))
+	partial := s.text
+	s.text = ""
 	s.mu.Unlock()
-	s.addTranscript("user", message)
+	if partial != "" {
+		s.addTranscript("assistant", partial)
+	}
+}
+
+// markStopped records a stop in the transcript (partial text + a system marker)
+// and then broadcasts the stopped event, keeping the live view and the
+// replayed view identical.
+func (e *Engine) markStopped(s *Session) {
+	e.persistPartial(s)
+	s.addTranscript("system", "[Stopped by user]")
+	e.publishNow(s, Event{"type": "stopped"})
+}
+
+// runConversation executes the tool-calling loop for one user message. The
+// user message itself is persisted by BeginChat before this goroutine starts.
+func (e *Engine) runConversation(s *Session) {
+	defer e.finish(s)
 
 	ag := e.registry.Get(s.AgentID)
 	if ag == nil {
@@ -172,7 +190,7 @@ func (e *Engine) runConversation(s *Session, message string) {
 
 	for round < e.cfg.Policy.RoundLimit {
 		if s.isStopped() {
-			e.publishNow(s, Event{"type": "stopped"})
+			e.markStopped(s)
 			return
 		}
 		round++
@@ -199,9 +217,10 @@ func (e *Engine) runConversation(s *Session, message string) {
 		})
 		if err != nil {
 			if s.isStopped() {
-				e.publishNow(s, Event{"type": "stopped"})
+				e.markStopped(s)
 				return
 			}
+			e.persistPartial(s)
 			seq := s.addTranscript("system", "[LLM Error] "+err.Error())
 			e.publish(s, seq, Event{"type": "llm_error", "error": err.Error()})
 			return
@@ -226,26 +245,26 @@ func (e *Engine) runConversation(s *Session, message string) {
 				for _, rest := range res.ToolCalls[i:] {
 					e.appendToolRaw(s, rest.ID, "Error: aborted before execution")
 				}
-				e.publishNow(s, Event{"type": "stopped"})
+				e.markStopped(s)
 				return
 			}
 			action := tc.Name
 			params, perr := parseArgs(tc.Arguments)
 			if perr != nil {
 				msg := "Error: invalid arguments: " + perr.Error()
-				seq := e.appendTool(s, tc.ID, action, msg)
+				seq := e.appendTool(s, tc.ID, action, params, msg)
 				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
 				continue
 			}
 			if _, known := command.SpecByName(action); !known {
 				msg := "Error: unknown action: " + action
-				seq := e.appendTool(s, tc.ID, action, msg)
+				seq := e.appendTool(s, tc.ID, action, params, msg)
 				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
 				continue
 			}
 			if !command.CheckSafety(action, params) {
 				msg := "Error: blocked by safety check"
-				seq := e.appendTool(s, tc.ID, action, msg)
+				seq := e.appendTool(s, tc.ID, action, params, msg)
 				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
 				continue
 			}
@@ -271,7 +290,7 @@ func (e *Engine) runConversation(s *Session, message string) {
 					for _, rest := range res.ToolCalls[i:] {
 						e.appendToolRaw(s, rest.ID, "Error: aborted before execution")
 					}
-					e.publishNow(s, Event{"type": "stopped"})
+					e.markStopped(s)
 					return
 				}
 				if !ok {
@@ -302,7 +321,7 @@ func (e *Engine) runConversation(s *Session, message string) {
 			job.Params = params
 			if err := ag.Enqueue(job); err != nil {
 				msg := "Error: agent offline"
-				seq := e.appendTool(s, tc.ID, action, msg)
+				seq := e.appendTool(s, tc.ID, action, params, msg)
 				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
 				continue
 			}
@@ -324,21 +343,21 @@ func (e *Engine) runConversation(s *Session, message string) {
 				}
 				if r.Err == agent.ErrClosed {
 					msg := "Error: agent offline"
-					seq := e.appendTool(s, tc.ID, action, msg)
+					seq := e.appendTool(s, tc.ID, action, params, msg)
 					e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
 					continue
 				}
 				// Persist the failure as this tool call's result so history
 				// replay matches the live view, and answer the remaining tool
 				// calls so the assistant/tool message sequence stays valid.
-				seq := e.appendTool(s, tc.ID, action, "Error: "+r.Err.Error())
+				seq := e.appendTool(s, tc.ID, action, params, "Error: "+r.Err.Error())
 				for _, rest := range res.ToolCalls[i+1:] {
 					e.appendToolRaw(s, rest.ID, "Error: skipped because the agent connection failed")
 				}
 				e.publish(s, seq, Event{"type": "execution_error", "action": action, "params": params, "error": r.Err.Error()})
 				return
 			}
-			seq := e.appendTool(s, tc.ID, action, r.Output)
+			seq := e.appendTool(s, tc.ID, action, params, r.Output)
 			e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": r.Output})
 		}
 		if denied {
@@ -380,13 +399,28 @@ func (e *Engine) buildMessages(s *Session, system string) []llm.Message {
 	return msgs
 }
 
-func (e *Engine) appendTool(s *Session, id, label, content string) uint64 {
+// actionDetail renders the parameter detail shown next to an action's name,
+// matching the live web/CLI rendering (command first, then path). Persisting
+// it in the transcript means a page refresh replays the same text instead of
+// dropping the detail.
+func actionDetail(params map[string]any) string {
+	if v, ok := params["command"].(string); ok && v != "" {
+		return " [" + v + "]"
+	}
+	if v, ok := params["path"].(string); ok && v != "" {
+		return " [" + v + "]"
+	}
+	return ""
+}
+
+func (e *Engine) appendTool(s *Session, id, label string, params map[string]any, content string) uint64 {
 	if content == "" {
 		content = "(no output)"
 	}
+	text := "[" + label + "]" + actionDetail(params) + "\n" + content
 	s.mu.Lock()
 	s.history = append(s.history, llm.ToolMessage(content, id))
-	s.transcript = append(s.transcript, TranscriptEntry{Role: "result", Text: "[" + label + "]\n" + content})
+	s.transcript = append(s.transcript, TranscriptEntry{Role: "result", Text: text})
 	s.seq++
 	seq := s.seq
 	s.mu.Unlock()

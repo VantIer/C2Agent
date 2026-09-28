@@ -204,8 +204,14 @@ func (e *Engine) BeginChat(sessionID, message string) error {
 	s.running = true
 	s.runCtx, s.cancel = context.WithCancel(context.Background())
 	s.done = make(chan struct{})
+	// Persist the user message synchronously (before the run goroutine starts)
+	// so a snapshot/history request racing the turn already contains it and the
+	// optimistic UI node is never the only copy.
+	s.history = append(s.history, llm.UserMessage(message))
+	s.transcript = append(s.transcript, TranscriptEntry{Role: "user", Text: message})
+	s.seq++
 	s.mu.Unlock()
-	go e.runConversation(s, message)
+	go e.runConversation(s)
 	return nil
 }
 

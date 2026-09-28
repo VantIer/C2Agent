@@ -12,9 +12,22 @@ package main
 // third-party dependencies.
 
 import (
+	"context"
+	"os/exec"
 	"syscall"
 	"unsafe"
 )
+
+// shellCmd runs command through cmd.exe. The command line is supplied verbatim
+// via SysProcAttr.CmdLine so Go's CRT-style argument escaping does not mangle
+// embedded quotes: exec.Command("cmd", "/C", command) would rewrite
+// `"C:\Program Files\x.exe"` as `\"C:\Program Files\x.exe\"`, which cmd.exe
+// then rejects ("is not recognized as an internal or external command").
+func shellCmd(ctx context.Context, command string) *exec.Cmd {
+	c := exec.CommandContext(ctx, "cmd.exe")
+	c.SysProcAttr = &syscall.SysProcAttr{CmdLine: "cmd.exe /c " + command}
+	return c
+}
 
 const cpUTF8 = 65001
 
