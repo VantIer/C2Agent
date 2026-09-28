@@ -176,13 +176,12 @@ func (c *CLI) listSessions() {
 		return
 	}
 	for i, s := range sessions {
-		snap := s.Snapshot()
 		mark := " "
 		if s.ID == activeID {
 			mark = "*"
 		}
 		status := "idle"
-		if snap.Running {
+		if s.Running() {
 			status = "running"
 		}
 		fmt.Printf(" %s [%d] %-22s %-8s %s\n", mark, i, s.ID, status, s.Title)
@@ -284,14 +283,22 @@ func (c *CLI) chat(message string) {
 			return
 		}
 	}
-	ch, unsub := c.eng.Subscribe("", s.ID)
+	ch, dropped, unsub := c.eng.Subscribe("", s.ID)
 	defer unsub()
 	if err := c.eng.BeginChat(s.ID, message); err != nil {
 		fmt.Println("error:", err)
 		return
 	}
 	inStream := false
-	for ev := range ch {
+	for {
+		var ev engine.Event
+		select {
+		case <-dropped:
+			c.endStream(&inStream)
+			fmt.Println("\n[stream dropped]")
+			return
+		case ev = <-ch:
+		}
 		switch ev["type"] {
 		case "chunk":
 			fmt.Print(ev["content"])
@@ -302,11 +309,20 @@ func (c *CLI) chat(message string) {
 		case "execution_done":
 			c.endStream(&inStream)
 			fmt.Printf("[result]\n%v\n", ev["result"])
+		case "execution_error":
+			c.endStream(&inStream)
+			fmt.Printf("[result]\nError: %v\n", ev["error"])
+		case "agent_error":
+			c.endStream(&inStream)
+			fmt.Printf("[result]\nError: %v\n", ev["error"])
 		case "auth_required":
 			c.endStream(&inStream)
 			c.promptAuth(s.ID, ev)
-		case "auth_denied":
+		case "execution_denied":
 			fmt.Println("[denied]")
+		case "llm_error":
+			c.endStream(&inStream)
+			fmt.Println("\n[LLM Error]", ev["error"])
 		case "error":
 			c.endStream(&inStream)
 			fmt.Println("\n[error]", ev["error"])

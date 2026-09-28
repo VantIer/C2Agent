@@ -14,7 +14,6 @@ type fakeBackend struct {
 	onClose int32
 }
 
-func (f *fakeBackend) Kind() Kind { return KindNative }
 func (f *fakeBackend) Execute(ctx context.Context, action string, params map[string]any) (string, error) {
 	atomic.AddInt32(&f.calls, 1)
 	if f.delay > 0 {

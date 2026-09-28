@@ -15,6 +15,11 @@ LDFLAGS="-s -w"
 CONTROL_PKG="./cmd/c2agent"
 REMOTE_DIR="remote/remote-go"
 
+# The remote agent is an independent module; `go vet ./...` from the repo root
+# does not cover it, so lint it explicitly.
+echo ">> vet $REMOTE_DIR"
+( cd "$REMOTE_DIR" && go vet ./... )
+
 build() {
   local goos=$1 goarch=$2 ext=$3
   echo ">> control    $goos/$goarch"
@@ -23,7 +28,7 @@ build() {
 
   echo ">> remote-go  $goos/$goarch"
   ( cd "$ROOT/$REMOTE_DIR" && GOOS="$goos" GOARCH="$goarch" go build -trimpath -tags "$TAGS" -ldflags "$LDFLAGS" \
-      -o "$ROOT/$OUT/remote-go/c2a_remote_${goos}_${goarch}${ext}" . )
+      -o "$ROOT/$OUT/remote-go/c2agent_remote_${goos}_${goarch}${ext}" . )
 }
 
 # Requested targets

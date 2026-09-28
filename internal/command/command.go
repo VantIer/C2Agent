@@ -120,18 +120,22 @@ func RequiresAuth(mode int, name string) bool {
 // Forbidden substrings / patterns for shell commands.
 var (
 	forbiddenPatterns = []string{"format c:", "mkfs.", "dd if=/dev/zero"}
-	rmArgRe           = regexp.MustCompile(`(?i)\brm\s+-[a-z]*[rf][a-z]*\s+(\S+)`)
+	// rm with any flags, capturing the target operand (handles separated flags
+	// like `rm -r -f /` and long flags like `--recursive`).
+	rmArgRe = regexp.MustCompile(`(?i)\brm\b(?:\s+-{1,2}[a-z]+)*\s+(\S+)`)
 )
 
-// CheckSafety blocks clearly destructive shell commands.
+// CheckSafety blocks clearly destructive shell commands. This is a best-effort
+// blacklist, not a security boundary.
 func CheckSafety(action string, params map[string]any) bool {
 	if action != "exec_cmd" {
 		return true
 	}
 	cmd := String(params["command"])
-	lower := strings.ToLower(cmd)
+	// Collapse runs of whitespace so e.g. "format  c:" is still caught.
+	norm := strings.ToLower(strings.Join(strings.Fields(cmd), " "))
 	for _, p := range forbiddenPatterns {
-		if strings.Contains(lower, p) {
+		if strings.Contains(norm, p) {
 			return false
 		}
 	}

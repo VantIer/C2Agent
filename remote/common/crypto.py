@@ -143,9 +143,3 @@ class EncryptedStream:
         if pr.buffered:
             raw = pr.drain_all()
             pr.feed(self._rx.crypt(raw))
-
-    def close(self) -> None:
-        try:
-            self._writer.close()
-        except Exception:
-            pass

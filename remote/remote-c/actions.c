@@ -9,7 +9,7 @@
 /* ===================================================================== */
 
 static char *slurp(const char *path, size_t *out_len) {
-    FILE *f = iru_fopen(path, "rb");
+    FILE *f = c2a_fopen(path, "rb");
     if (!f) return NULL;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
     long sz = ftell(f);
@@ -25,9 +25,9 @@ static char *slurp(const char *path, size_t *out_len) {
 }
 
 static int copy_file(const char *src, const char *dest) {
-    FILE *fin = iru_fopen(src, "rb");
+    FILE *fin = c2a_fopen(src, "rb");
     if (!fin) return -1;
-    FILE *fout = iru_fopen(dest, "wb");
+    FILE *fout = c2a_fopen(dest, "wb");
     if (!fout) { fclose(fin); return -1; }
     char buf[65536];
     size_t n;
@@ -58,6 +58,7 @@ static int rmtree(const char *path) {
     wchar_t pattern[PROTO_MAX_PATH];
     int have_glob = (wide_glob(wpath, pattern, PROTO_MAX_PATH) == 0);
     free(wpath);
+    int rc = 0;
     if (have_glob) {
         WIN32_FIND_DATAW fd;
         HANDLE h = FindFirstFileW(pattern, &fd);
@@ -65,18 +66,21 @@ static int rmtree(const char *path) {
             do {
                 if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
                 char *name = wide_to_utf8(fd.cFileName);
-                if (!name) continue;
+                if (!name) { rc = -1; continue; }
                 char full[PROTO_MAX_PATH];
                 snprintf(full, sizeof full, "%s\\%s", path, name);
                 free(name);
-                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) rmtree(full);
-                else iru_remove(full);
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                    if (rmtree(full) != 0) rc = -1;
+                } else if (c2a_remove(full) != 0) {
+                    rc = -1;
+                }
             } while (FindNextFileW(h, &fd));
             FindClose(h);
         }
     }
-    iru_rmdir(path);
-    return 0;
+    if (c2a_rmdir(path) != 0) rc = -1;
+    return rc;
 }
 
 static int copy_tree(const char *src, const char *dest) {
@@ -128,7 +132,7 @@ static char *act_list_dir(const char *path) {
         int isd = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         unsigned long long sz = isd ? 0ULL
             : (((unsigned long long)fd.nFileSizeHigh << 32) | (unsigned long long)fd.nFileSizeLow);
-        sb_printf(&out, "%s %12" IRU_ULL " %s\n", isd ? "DIR" : "FILE", sz, name);
+        sb_printf(&out, "%s %12" C2A_ULL " %s\n", isd ? "DIR" : "FILE", sz, name);
         free(name);
         count++;
     } while (FindNextFileW(h, &fd));
@@ -143,19 +147,23 @@ static int rmtree(const char *path) {
     DIR *d = opendir(path);
     if (!d) return -1;
     struct dirent *de;
+    int rc = 0;
     while ((de = readdir(d)) != NULL) {
         if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
         char full[PROTO_MAX_PATH];
         snprintf(full, sizeof full, "%s/%s", path, de->d_name);
         struct stat st;
         if (lstat(full, &st) == 0) {
-            if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) rmtree(full);
-            else remove(full);
+            if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
+                if (rmtree(full) != 0) rc = -1;
+            } else if (remove(full) != 0) {
+                rc = -1;
+            }
         }
     }
     closedir(d);
-    remove(path);
-    return 0;
+    if (remove(path) != 0) rc = -1;
+    return rc;
 }
 
 static int copy_tree(const char *src, const char *dest) {
@@ -199,7 +207,7 @@ static char *act_list_dir(const char *path) {
             isd = S_ISDIR(st.st_mode);
             if (!isd) sz = (unsigned long long)st.st_size;
         }
-        sb_printf(&out, "%s %12" IRU_ULL " %s\n", isd ? "DIR" : "FILE", sz, de->d_name);
+        sb_printf(&out, "%s %12" C2A_ULL " %s\n", isd ? "DIR" : "FILE", sz, de->d_name);
         count++;
     }
     closedir(d);
@@ -231,7 +239,7 @@ static void path_with_name(const char *path, const char *new_name, char *out, si
 /* ===================================================================== */
 
 static char *act_get_cwd(void) {
-    char *cwd = iru_getcwd();
+    char *cwd = c2a_getcwd();
     if (!cwd) return printf_str("Error getting cwd: %s", "failed");
     return cwd;
 }
@@ -250,20 +258,22 @@ static char *act_create_file(char **p, int n) {
     const char *path = p[0];
     if (path_exists(path)) return printf_str("File already exists: %s", path);
     make_parent_dirs(path);
-    FILE *f = iru_fopen(path, "wb");
+    FILE *f = c2a_fopen(path, "wb");
     if (!f) return printf_str("Error creating file: %s", strerror(errno));
     fclose(f);
     return printf_str("Successfully created file: %s", path);
 }
 
-static char *act_delete(char **p, int n) {
+static char *act_delete(char **p, int n, int want_dir) {
     if (n < 1) return xstrdup("Error: missing delete path");
     const char *path = p[0];
     if (!path_exists(path)) return printf_str("Path does not exist: %s", path);
-    if (is_dir(path)) {
+    if (is_dir(path) != want_dir)
+        return printf_str("Error: not a %s: %s", want_dir ? "directory" : "file", path);
+    if (want_dir) {
         if (rmtree(path) != 0) return printf_str("Error deleting: %s", strerror(errno));
     } else {
-        if (iru_remove(path) != 0) return printf_str("Error deleting: %s", strerror(errno));
+        if (c2a_remove(path) != 0) return printf_str("Error deleting: %s", strerror(errno));
     }
     return printf_str("Successfully deleted: %s", path);
 }
@@ -276,7 +286,7 @@ static char *act_rename(char **p, int n) {
     char newpath[PROTO_MAX_PATH];
     path_with_name(path, new_name, newpath, sizeof newpath);
     if (path_exists(newpath)) return printf_str("Target name already exists: %s", new_name);
-    if (iru_rename(path, newpath) != 0) return printf_str("Error renaming: %s", strerror(errno));
+    if (c2a_rename(path, newpath) != 0) return printf_str("Error renaming: %s", strerror(errno));
     return printf_str("Successfully renamed: %s -> %s", path, new_name);
 }
 
@@ -296,6 +306,8 @@ static char *act_read_file(char **p, int n) {
     int whole = (sl == NULL || sl[0] == 0 || strcmp(sl, "0") == 0);
     if (whole) {
         size_t take = blen < READ_FILE_LIMIT ? blen : READ_FILE_LIMIT;
+        /* Do not split a multi-byte UTF-8 sequence at the truncation point. */
+        while (take > 0 && take < blen && ((unsigned char)raw[take] & 0xC0) == 0x80) take--;
         char *res = (char *)malloc(take + 1);
         if (!res) { free(raw); return xstrdup("Error reading file: out of memory"); }
         memcpy(res, raw, take);
@@ -326,10 +338,26 @@ static char *act_read_file(char **p, int n) {
         i = e;
     }
 
-    int start = atoi(sl);
-    if (start < 1) start = 1;
+    int start = 1;
+    if (sl && sl[0] && strcmp(sl, "0") != 0) {
+        char *sp = NULL;
+        long sv = strtol(sl, &sp, 10);
+        if (sp == sl || *sp != '\0' || sv < 1) {
+            free(lines);
+            free(raw);
+            return printf_str("Invalid start_line: %s", sl);
+        }
+        start = (int)sv;
+    }
     int s = start - 1;
-    int end = (el && el[0] && strcmp(el, "0")) ? atoi(el) : nlines;
+    /* end defaults to end-of-file; an invalid end_line falls back to it too
+     * (matches the Go agent). */
+    int end = nlines;
+    if (el && el[0] && strcmp(el, "0") != 0) {
+        char *endp = NULL;
+        long v = strtol(el, &endp, 10);
+        if (endp != el && *endp == '\0' && v > 0) end = (int)v;
+    }
     if (s >= nlines) {
         char *err = printf_str("Start line %s exceeds file line count (%d)", sl, nlines);
         free(lines);
@@ -353,7 +381,7 @@ static char *act_write_file(char **p, int n) {
     const char *path = p[0];
     const char *content = p[1];
     make_parent_dirs(path);
-    FILE *f = iru_fopen(path, "wb");
+    FILE *f = c2a_fopen(path, "wb");
     if (!f) return printf_str("Error writing file: %s", strerror(errno));
     size_t clen = strlen(content);
     if (clen) fwrite(content, 1, clen, f);
@@ -404,7 +432,14 @@ static char *act_edit_file(char **p, int n) {
     int start = atoi(sl);
     if (start < 1) start = 1;
     int s = start - 1;
-    int end = (el && el[0] && strcmp(el, "0")) ? atoi(el) : 0;
+    /* end defaults to end-of-file (matches the Go/shell agents); an invalid
+     * end_line also falls back to it. */
+    int end = nlines;
+    if (el && el[0] && strcmp(el, "0") != 0) {
+        char *endp = NULL;
+        long v = strtol(el, &endp, 10);
+        if (endp != el && *endp == '\0' && v > 0) end = (int)v;
+    }
     if (end > nlines) end = nlines;
 
     int ok = 1;
@@ -477,7 +512,7 @@ static char *act_edit_file(char **p, int n) {
         return err;
     }
 
-    FILE *f = iru_fopen(path, "wb");
+    FILE *f = c2a_fopen(path, "wb");
     if (!f) {
         char *e2 = printf_str("Error editing file: %s", strerror(errno));
         for (int k = 0; k < nlines; k++) free(ll[k].s);
@@ -514,7 +549,16 @@ static char *act_move(char **p, int n) {
     const char *dest = p[1];
     if (!path_exists(src)) return printf_str("Source not found: %s", src);
     make_parent_dirs(dest);
-    if (iru_rename(src, dest) != 0) return printf_str("Error moving: %s", strerror(errno));
+    if (c2a_rename(src, dest) == 0)
+        return printf_str("Successfully moved: %s -> %s", src, dest);
+    /* Cross-device fallback: copy then delete. */
+    if (is_dir(src)) {
+        if (copy_tree(src, dest) != 0) return printf_str("Error moving: %s", strerror(errno));
+        if (rmtree(src) != 0) return printf_str("Error moving: %s", strerror(errno));
+    } else {
+        if (copy_file(src, dest) != 0) return printf_str("Error moving: %s", strerror(errno));
+        if (c2a_remove(src) != 0) return printf_str("Error moving: %s", strerror(errno));
+    }
     return printf_str("Successfully moved: %s -> %s", src, dest);
 }
 
@@ -529,8 +573,8 @@ char *run_action(uint8_t cmd, char **p, int n, int cmd_timeout) {
                                 return act_list_dir(p[0]);
         case CMD_MAKE_DIR:      return act_make_dir(p, n);
         case CMD_CREATE_FILE:   return act_create_file(p, n);
-        case CMD_DELETE_DIR:    return act_delete(p, n);
-        case CMD_DELETE_FILE:   return act_delete(p, n);
+        case CMD_DELETE_DIR:    return act_delete(p, n, 1);
+        case CMD_DELETE_FILE:   return act_delete(p, n, 0);
         case CMD_RENAME_DIR:    return act_rename(p, n);
         case CMD_RENAME_FILE:   return act_rename(p, n);
         case CMD_READ_FILE:     return act_read_file(p, n);

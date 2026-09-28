@@ -21,7 +21,6 @@ const (
 	BodyLenOff    = 8
 	CmdOff        = 15
 	DataChunkSize = 1024
-	ReadFileLimit = 51200    // whole-file read truncation (matches remote constant)
 	MaxBodyLen    = 32 << 20 // upper bound on a single packet body (32 MiB)
 )
 

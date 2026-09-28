@@ -53,9 +53,6 @@ func NewBackend(conn net.Conn) *Backend {
 	}
 }
 
-// Kind implements agent.Backend.
-func (b *Backend) Kind() agent.Kind { return agent.KindNative }
-
 func (b *Backend) write(pkt []byte) error {
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
@@ -95,6 +92,9 @@ func (b *Backend) deliver(pkt *protocol.Packet) {
 }
 
 func (b *Backend) forward(ctx context.Context, cmd uint8, params []string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	reqID := b.nextReq.Add(1)
 	ch := make(chan string, 1)
 	b.pendingMu.Lock()
@@ -136,6 +136,9 @@ func (b *Backend) Execute(ctx context.Context, action string, params map[string]
 
 // Upload streams a local file to destPath on the agent.
 func (b *Backend) Upload(ctx context.Context, localPath, destPath string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	info, err := os.Stat(localPath)
 	if err != nil || info.IsDir() {
 		return "Error: local file not found: " + localPath, nil
@@ -219,7 +222,7 @@ func (b *Backend) Download(ctx context.Context, srcPath, destDir string) (string
 		close(dq.done)
 	}()
 
-	dest := filepath.Join(destDir, filepath.Base(srcPath))
+	dest := filepath.Join(destDir, agent.BaseName(srcPath))
 	pkt, err := protocol.EncodeRequest(reqID, protocol.CmdDownload, []string{srcPath})
 	if err != nil {
 		return "", err

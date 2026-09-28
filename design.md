@@ -12,7 +12,7 @@
 
 | 版本 | 日期 | 说明 |
 | ---- | ---- | ---- |
-| v0.1 | 2026-09-26 | 初稿：整合 `demo/Irudo`、`demo/Infection` 两版实验，控制端改为 Go，支持双受控端并存；LLM 采用原生 Tool/Function Calling |
+| v0.1 | 2026-09-26 | 初稿：整合早期两版 Python 实验（二进制协议 + 反弹 Shell），控制端改为 Go，支持双受控端并存；LLM 采用原生 Tool/Function Calling |
 | v0.2 | 2026-09-26 | 完善：每 Agent 支持**多会话**（会话彼此独立）；同一 Agent 的指令以**线性队列**下发执行并回传对应会话；**排队等待不超时、执行中受超时限制** |
 | v0.3 | 2026-09-26 | 技术选型：LLM 使用官方库 **`github.com/openai/openai-go`** |
 | v0.4 | 2026-09-26 | **去除 Wails**（依赖 CGO/webview，阻碍交叉编译）；前端回归 **headless HTTP + SSE + `go:embed`**，保证 `CGO_ENABLED=0` 跨平台交叉编译 |
@@ -25,7 +25,7 @@
 
 ## 1. 设计目标
 
-将两版 Python 实验（`Irudo` 二进制协议 + `Infection` 反弹 Shell）统一到一个
+将两版 Python 实验（二进制协议 + 反弹 Shell）统一到一个
 **Go 控制端**中，实现：
 
 1. **控制端 Go 化**：单一 Go 二进制，跨平台（Windows/Linux/macOS），性能与部署优于 Python。
@@ -208,12 +208,10 @@ C2Agent/
 │   ├── command/
 │   │   └── command.go            # 动作用表：名称/参数/风险/安全检查
 │   ├── llm/
-│   │   ├── client.go             # OpenAI 兼容客户端（stream+tools）
-│   │   └── tools.go              # 动作 → tools schema
+│   │   └── client.go             # OpenAI 兼容客户端（stream+tools，含 tools schema 生成）
 │   ├── engine/
-│   │   ├── engine.go             # Engine：会话集合 + 每 Agent 活动会话
-│   │   ├── session.go            # Session 模型（多会话、历史、任务）
-│   │   ├── auth.go               # 授权（CLI/Web，按会话）、轮数
+│   │   ├── engine.go             # Engine：会话集合 + 授权/轮数 + 每 Agent 活动会话
+│   │   ├── session.go            # Session 模型 + 会话循环（授权/轮数/工具执行）
 │   │   └── events.go             # 订阅广播（SSE 事件，带 session+agent）
 │   ├── web/
 │   │   ├── server.go             # net/http 路由 + SSE + 文件 API
@@ -637,7 +635,7 @@ C2 将动作表编译为 OpenAI tools。每个动作一个 function：
 | move | **src**, **dest** |
 | exec_cmd | **command** |
 
-- 工具定义由 `llm/tools.go` 从 `command` 包的动作表**自动生成**，避免两处漂移。
+- 工具定义由 `llm/client.go`（`BuildTools`）从 `command` 包的动作表**自动生成**，避免两处漂移。
 - `system_prompt` 中 `{system_name}` 由 C2 按当前会话绑定 Agent 的 OS 替换；提示词不含 agent id/host。
 
 ### 8.2 会话循环
@@ -892,13 +890,13 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
     `GET /api/history?session_id=`
   - `POST /api/set-auth`、`POST /api/authorize-execute`（带 `session_id`）、
     `POST /api/stop`（带 `session_id`）、`POST /api/reset`（带 `session_id`）
-  - `POST /api/chat-stream`（带 `session_id`；为空则新建会话，返回 SSE）
+  - `GET /api/chat-stream`（带 `session_id`；返回 SSE，附加时先重放快照）
   - `POST /api/exec-cmd`（直连命令，入 active Agent 的队列，不属任何会话）
   - `GET /api/files/list`、`POST /api/files/{parent,chdir,new,delete,mkdir,copy,move}`
   - `GET /api/files/download`、`POST /api/files/upload`
 - SSE 事件均携带 `agent` 与 `session` 字段，前端按当前会话过滤。
 - 前端 `ui/`：左侧 Agent 列表、会话标签页（多会话切换/新建/关闭）、聊天区（Markdown / 终端风格）、
-  授权弹窗、文件管理器、主题切换、授权模式滑动选择；**零构建**（原生 HTML/JS，移植 Irudo 风格）。
+  授权弹窗、文件管理器、主题切换、授权模式滑动选择；**零构建**（原生 HTML/JS，移植既有控制台风格）。
 - 上传：浏览器字节流式缓冲到 `ul_temp_dir`（uuid 唯一名）→ 传输 → 删除临时文件。
 - 下载：两类受控端统一落到 `dl_temp_dir/<basename>`（重名覆盖）→ `http.ServeContent` 回传浏览器（临时文件保留）。
 - 文件路径按 active Agent 的 OS 归一化（Windows 驱动器根处理）。
@@ -1008,9 +1006,9 @@ CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o bin/c2agent_darwin_arm64    
 # Python 受控端（导入已按当前目录布局调整）
 python remote/remote-py/main.py --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token change-me-shared-token
 # C 受控端（编译见 remote/remote-c/COMPILE.txt）
-./irudo_remote --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token change-me-shared-token
+./c2agent_remote --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token change-me-shared-token
 # Go 受控端（remote/remote-go，独立 module）
-./remote/remote-go/irudo_remote --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token change-me-shared-token
+./remote/remote-go/c2agent_remote --c2-address <C2_IP>:8881 --agent-id server-01 --auth-token change-me-shared-token
 ```
 
 **受控端 B（Shell）**：

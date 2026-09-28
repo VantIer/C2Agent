@@ -4,27 +4,10 @@
  */
 #include "agent.h"
 
-static int safety_check(const char *cmd) {
-    /* lower-case scan for forbidden patterns */
-    static const char *forbidden[] = { "rm -rf /" };
-    size_t n = strlen(cmd);
-    for (size_t i = 0; i + 8 <= n; i++) {
-        int match = 1;
-        for (size_t j = 0; j < sizeof(forbidden[0]) - 1; j++) {
-            char c = cmd[i + j];
-            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-            if (c != forbidden[0][j]) { match = 0; break; }
-        }
-        if (match) return 0;
-    }
-    return 1;
-}
-
 #ifdef _WIN32
 
 char *run_cmd(const char *cmd, int timeout_sec) {
     if (!cmd || !*cmd) return xstrdup("Error: Empty command");
-    if (!safety_check(cmd)) return xstrdup("Error: Command blocked due to safety concerns");
 
     SECURITY_ATTRIBUTES sa;
     sa.nLength = sizeof(sa);
@@ -147,8 +130,6 @@ char *run_cmd(const char *cmd, int timeout_sec) {
 
 char *run_cmd(const char *cmd, int timeout_sec) {
     if (!cmd || !*cmd) return xstrdup("Error: Empty command");
-    if (!safety_check(cmd)) return xstrdup("Error: Command blocked due to safety concerns");
-
     int p[2];
     if (pipe(p) != 0) return printf_str("Error: %s", strerror(errno));
 

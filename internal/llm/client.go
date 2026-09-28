@@ -115,6 +115,10 @@ func (c *Client) chatStream(ctx context.Context, params openai.ChatCompletionNew
 	acc := map[int64]*ToolCall{}
 	var order []int64
 	var sb strings.Builder
+	// Some OpenAI-compatible endpoints omit or reuse tool_call.index; fall back
+	// to a synthetic slot when a chunk clearly starts a different call at an
+	// index that already holds another one.
+	synth := int64(1 << 30)
 
 	for stream.Next() {
 		chunk := stream.Current()
@@ -129,11 +133,18 @@ func (c *Client) chatStream(ctx context.Context, params openai.ChatCompletionNew
 			}
 		}
 		for _, tcd := range d.ToolCalls {
-			a := acc[tcd.Index]
+			idx := tcd.Index
+			if a := acc[idx]; a != nil &&
+				((tcd.ID != "" && a.ID != "" && tcd.ID != a.ID) ||
+					(tcd.Function.Name != "" && a.Name != "" && tcd.Function.Name != a.Name)) {
+				idx = synth
+				synth++
+			}
+			a := acc[idx]
 			if a == nil {
 				a = &ToolCall{}
-				acc[tcd.Index] = a
-				order = append(order, tcd.Index)
+				acc[idx] = a
+				order = append(order, idx)
 			}
 			if tcd.ID != "" {
 				a.ID = tcd.ID

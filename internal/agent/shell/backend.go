@@ -20,6 +20,7 @@ type shellResult struct {
 
 type pendingReq struct {
 	lastCommand string
+	marker      string
 	lines       []string
 	ch          chan shellResult
 }
@@ -29,7 +30,6 @@ type Backend struct {
 	id      string
 	conn    net.Conn
 	writeMu *sync.Mutex
-	marker  string
 	osName  string
 
 	mu      sync.Mutex
@@ -39,23 +39,11 @@ type Backend struct {
 	closed chan struct{}
 }
 
-func newBackend(id string, conn net.Conn, marker string) *Backend {
-	return &Backend{id: id, conn: conn, writeMu: &sync.Mutex{}, marker: marker, closed: make(chan struct{})}
-}
-
-// Closed reports whether the connection has been torn down.
-func (b *Backend) Closed() bool {
-	select {
-	case <-b.closed:
-		return true
-	default:
-		return false
-	}
+func newBackend(id string, conn net.Conn) *Backend {
+	return &Backend{id: id, conn: conn, writeMu: &sync.Mutex{}, closed: make(chan struct{})}
 }
 
 func (b *Backend) setOS(os string) { b.osName = os }
-
-func (b *Backend) Kind() agent.Kind { return agent.KindShell }
 
 func (b *Backend) write(p []byte) error {
 	b.writeMu.Lock()
@@ -68,7 +56,8 @@ func (b *Backend) write(p []byte) error {
 // reply. Queue/exec timeout is provided by the caller's context.
 func (b *Backend) request(ctx context.Context, command string) (string, error) {
 	command = oneLine(command)
-	p := &pendingReq{lastCommand: command, ch: make(chan shellResult, 1)}
+	marker := randMarker()
+	p := &pendingReq{marker: marker, lastCommand: command, ch: make(chan shellResult, 1)}
 
 	b.mu.Lock()
 	if b.pending != nil {
@@ -79,7 +68,7 @@ func (b *Backend) request(ctx context.Context, command string) (string, error) {
 	b.lineBuf = ""
 	b.mu.Unlock()
 
-	payload := command + "\necho " + b.marker + "\n"
+	payload := command + "\necho " + marker + "\n"
 	if err := b.write([]byte(payload)); err != nil {
 		b.clearPending(p)
 		return "", agent.NewNetworkError("send: %v", err)
@@ -89,9 +78,21 @@ func (b *Backend) request(ctx context.Context, command string) (string, error) {
 	case r := <-p.ch:
 		return r.out, r.err
 	case <-ctx.Done():
-		b.clearPending(p)
+		b.abortRequest(p)
 		return "", ctx.Err()
 	}
+}
+
+// abortRequest clears the pending request and drops the connection: a
+// timed-out command may still be running, so its late output must never be
+// attributed to a later request, and the bot is re-established on reconnect.
+func (b *Backend) abortRequest(p *pendingReq) {
+	b.mu.Lock()
+	if b.pending == p {
+		b.pending = nil
+	}
+	b.mu.Unlock()
+	_ = b.conn.Close()
 }
 
 func (b *Backend) clearPending(p *pendingReq) {
@@ -141,15 +142,13 @@ func (b *Backend) handleData(data string) {
 		}
 		line := strings.TrimRight(b.lineBuf[:idx], "\r")
 		b.lineBuf = b.lineBuf[idx+1:]
-		if line == b.marker {
+		if b.pending != nil && line == b.pending.marker {
 			p := b.pending
 			b.pending = nil
-			if p != nil {
-				out := stripShellResponse(p.lines, b.marker, p.lastCommand)
-				select {
-				case p.ch <- shellResult{out: out}:
-				default:
-				}
+			out := stripShellResponse(p.lines, p.marker, p.lastCommand)
+			select {
+			case p.ch <- shellResult{out: out}:
+			default:
 			}
 			b.lineBuf = ""
 			continue
@@ -182,6 +181,10 @@ func (b *Backend) Execute(ctx context.Context, action string, params map[string]
 	case "read_file":
 		if b.osName == "Windows" {
 			out = decodeReadFile(out, params)
+		}
+		// Match the native agents: whole-file reads are capped at 51200 chars.
+		if s := paramString(params["start_line"]); s == "" || s == "0" {
+			out = truncateRunes(out, 51200)
 		}
 	}
 	return out, nil
@@ -227,7 +230,7 @@ func (b *Backend) Download(ctx context.Context, srcPath, destDir string) (string
 		}
 		return "", agent.NewNetworkError("download: %s", trimmed)
 	}
-	dest := filepath.Join(destDir, filepath.Base(srcPath))
+	dest := filepath.Join(destDir, agent.BaseName(srcPath))
 	if err := os.WriteFile(dest, data, 0o644); err != nil {
 		return "", err
 	}
@@ -296,8 +299,11 @@ func decodeReadFile(b64out string, params map[string]any) string {
 		return content
 	}
 	s, err := atoiSafe(start)
-	if err != nil || s < 1 {
-		return content
+	if err != nil {
+		return "Error: invalid start_line: " + start
+	}
+	if s < 1 {
+		s = 1
 	}
 	lines := strings.Split(content, "\n")
 	if s-1 >= len(lines) {

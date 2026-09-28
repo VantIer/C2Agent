@@ -33,7 +33,7 @@ type Engine struct {
 	tools    []openai.ChatCompletionToolParam
 	hub      *eventHub
 
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	sessions map[string]*Session
 	byAgent  map[string]map[string]*Session
 	active   map[string]string
@@ -46,7 +46,20 @@ type Engine struct {
 // New creates an engine using the official OpenAI-compatible client.
 func New(cfg *config.Config, reg *agent.Registry) *Engine {
 	client := llm.New(cfg.LLM.APIBase, cfg.LLM.APIKey, cfg.LLM.Model, cfg.LLM.Temperature, cfg.LLM.Stream)
-	return NewWithClient(cfg, reg, client)
+	e := NewWithClient(cfg, reg, client)
+	reg.AddRemoveListener(e.onAgentRemoved)
+	return e
+}
+
+// onAgentRemoved closes any sessions bound to an agent that has disconnected,
+// so stale sessions (and their authorization/stop state) are not reused on a
+// later reconnect, and the per-agent session quota is released.
+func (e *Engine) onAgentRemoved(ag *agent.Agent) {
+	go func() {
+		for _, s := range e.ListSessions(ag.ID) {
+			e.CloseSession(s.ID)
+		}
+	}()
 }
 
 // NewWithClient creates an engine with an injected chat client (for tests).
@@ -74,6 +87,11 @@ func (e *Engine) NewSession(agentID, title string) (*Session, error) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.newSessionLocked(agentID, title)
+}
+
+// newSessionLocked creates a session; e.mu must be held.
+func (e *Engine) newSessionLocked(agentID, title string) (*Session, error) {
 	if len(e.byAgent[agentID]) >= e.cfg.Policy.MaxSessionsPerAgent {
 		return nil, fmt.Errorf("session limit reached for agent %s", agentID)
 	}
@@ -95,24 +113,33 @@ func (e *Engine) NewSession(agentID, title string) (*Session, error) {
 }
 
 // EnsureSession returns the active session of an agent, creating one if none.
+// The lookup and creation are atomic so concurrent callers cannot create
+// duplicate sessions.
 func (e *Engine) EnsureSession(agentID string) (*Session, error) {
-	if s := e.ActiveSession(agentID); s != nil {
-		return s, nil
+	if e.registry.Get(agentID) == nil {
+		return nil, fmt.Errorf("no such agent: %s", agentID)
 	}
-	return e.NewSession(agentID, "")
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if id := e.active[agentID]; id != "" {
+		if s := e.sessions[id]; s != nil {
+			return s, nil
+		}
+	}
+	return e.newSessionLocked(agentID, "")
 }
 
 // GetSession returns a session by id.
 func (e *Engine) GetSession(id string) *Session {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	return e.sessions[id]
 }
 
 // ListSessions returns an agent's sessions, oldest first.
 func (e *Engine) ListSessions(agentID string) []*Session {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	out := make([]*Session, 0, len(e.byAgent[agentID]))
 	for _, s := range e.byAgent[agentID] {
 		out = append(out, s)
@@ -123,8 +150,8 @@ func (e *Engine) ListSessions(agentID string) []*Session {
 
 // ActiveSession returns the active session of an agent.
 func (e *Engine) ActiveSession(agentID string) *Session {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	return e.sessions[e.active[agentID]]
 }
 
@@ -146,15 +173,26 @@ func (e *Engine) CloseSession(id string) {
 		return
 	}
 	e.stopSession(s)
+	if !e.waitRun(s, 5*time.Second) {
+		// The conversation goroutine did not stop in time; keep the session
+		// rather than deleting it out from under itself.
+		return
+	}
 	e.mu.Lock()
 	delete(e.sessions, id)
 	if m := e.byAgent[s.AgentID]; m != nil {
 		delete(m, id)
 		if e.active[s.AgentID] == id {
 			e.active[s.AgentID] = ""
-			for k := range m {
-				e.active[s.AgentID] = k
-				break
+			var oldest *Session
+			for _, cand := range m {
+				if oldest == nil || cand.CreatedAt.Before(oldest.CreatedAt) ||
+					(cand.CreatedAt.Equal(oldest.CreatedAt) && cand.ID < oldest.ID) {
+					oldest = cand
+				}
+			}
+			if oldest != nil {
+				e.active[s.AgentID] = oldest.ID
 			}
 		}
 	}
@@ -178,6 +216,7 @@ func (e *Engine) BeginChat(sessionID, message string) error {
 	}
 	s.running = true
 	s.runCtx, s.cancel = context.WithCancel(context.Background())
+	s.done = make(chan struct{})
 	s.mu.Unlock()
 	go e.runConversation(s, message)
 	return nil
@@ -218,6 +257,11 @@ func (e *Engine) ResetConversation(sessionID string) bool {
 		return false
 	}
 	e.stopSession(s)
+	if !e.waitRun(s, 5*time.Second) {
+		// The conversation goroutine did not stop in time; do not clear its
+		// state from under it.
+		return false
+	}
 	s.mu.Lock()
 	s.history = nil
 	s.transcript = nil
@@ -229,6 +273,24 @@ func (e *Engine) ResetConversation(sessionID string) bool {
 	s.pending = nil
 	s.mu.Unlock()
 	return true
+}
+
+// waitRun waits until a session's running goroutine (if any) finishes. It
+// returns false if the timeout elapses first, so callers can avoid mutating a
+// session that may still be driven by runConversation.
+func (e *Engine) waitRun(s *Session, timeout time.Duration) bool {
+	s.mu.Lock()
+	runDone := s.done
+	s.mu.Unlock()
+	if runDone == nil {
+		return true
+	}
+	select {
+	case <-runDone:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // SubmitAuth delivers a user's authorization decision for a waiting session.
@@ -263,6 +325,8 @@ func (e *Engine) awaitAuth(s *Session, ch chan bool) bool {
 	s.mu.Unlock()
 	deadline := time.NewTimer(authWaitTimeout)
 	defer deadline.Stop()
+	tick := time.NewTicker(400 * time.Millisecond)
+	defer tick.Stop()
 	for {
 		s.mu.Lock()
 		pc := s.pending
@@ -277,7 +341,7 @@ func (e *Engine) awaitAuth(s *Session, ch chan bool) bool {
 		select {
 		case ok := <-ch:
 			return ok
-		case <-time.After(400 * time.Millisecond):
+		case <-tick.C:
 		case <-deadline.C:
 			return false
 		case <-ctx.Done():
@@ -326,9 +390,11 @@ func (e *Engine) GetTranscript(sessionID string) []TranscriptEntry {
 }
 
 // Subscribe registers an event subscriber (empty filters match everything).
-func (e *Engine) Subscribe(agentID, sessionID string) (<-chan Event, func()) {
+// The returned done channel is closed if the hub drops the subscriber (e.g. a
+// stalled consumer), so callers can stop waiting instead of blocking forever.
+func (e *Engine) Subscribe(agentID, sessionID string) (<-chan Event, <-chan struct{}, func()) {
 	sub := e.hub.subscribe(agentID, sessionID)
-	return sub.ch, func() { e.hub.unsubscribe(sub) }
+	return sub.ch, sub.done, func() { e.hub.unsubscribe(sub) }
 }
 
 func (e *Engine) resolve(agentID string) *agent.Agent {
@@ -342,8 +408,24 @@ func (e *Engine) wait(ag *agent.Agent, j *agent.Job) (string, error) {
 	if err := ag.Enqueue(j); err != nil {
 		return "", err
 	}
-	r := <-j.Result
-	return r.Output, r.Err
+	// Prefer a result that is already available; only treat the agent's close
+	// as an error when no result was (about to be) delivered.
+	select {
+	case r := <-j.Result:
+		return r.Output, r.Err
+	default:
+	}
+	select {
+	case r := <-j.Result:
+		return r.Output, r.Err
+	case <-ag.Done():
+		select {
+		case r := <-j.Result:
+			return r.Output, r.Err
+		default:
+			return "", agent.ErrClosed
+		}
+	}
 }
 
 // RunAction executes a high-level action on an agent (session-independent).

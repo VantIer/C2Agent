@@ -5,21 +5,11 @@ Provides file/shell command execution derived from the sample Localaw
 owns all policy decisions.
 """
 
+import locale
 import platform
 import shutil
 import subprocess
 from pathlib import Path
-
-
-FORBIDDEN_PATTERNS = ["rm -rf /"]
-
-
-def _check_safety(cmd: str) -> bool:
-    cmd_lower = cmd.lower()
-    for pattern in FORBIDDEN_PATTERNS:
-        if pattern.lower() in cmd_lower:
-            return False
-    return True
 
 
 def list_dir(path: str = ".") -> str:
@@ -69,12 +59,14 @@ def create_file(path: str) -> str:
         return f"Error creating file: {str(e)}"
 
 
-def delete(path: str) -> str:
+def delete(path: str, want_dir: bool = False) -> str:
     try:
         target = Path(path).resolve()
         if not target.exists():
             return f"Path does not exist: {path}"
-        if target.is_dir():
+        if target.is_dir() != want_dir:
+            return f"Error: not a {'directory' if want_dir else 'file'}: {path}"
+        if want_dir:
             shutil.rmtree(target)
         else:
             target.unlink()
@@ -106,13 +98,18 @@ def read_file(path: str, start_line: str = "0", end_line: str = "0") -> str:
             return f"{path} is a directory"
         with open(target, "r", encoding="utf-8") as f:
             lines = f.readlines()
-        if start_line in (0, "", None) or start_line == "0":
+        if start_line in ("", "0"):
             return "".join(lines)[:51200]
         try:
             start = max(0, int(start_line) - 1)
-            end = int(end_line) if end_line not in (0, "", None) else len(lines)
         except ValueError:
-            return f"Invalid line numbers: start_line={start_line}, end_line={end_line}"
+            return f"Invalid start_line: {start_line}"
+        end = len(lines)
+        if end_line not in ("", "0"):
+            try:
+                end = int(end_line)
+            except ValueError:
+                end = len(lines)  # invalid end_line -> to end of file
         end = min(len(lines), end)
         if start >= len(lines):
             return f"Start line {start_line} exceeds file line count ({len(lines)})"
@@ -143,9 +140,14 @@ def edit_file(path: str, operation: str, start_line: str, end_line: str, content
             lines = f.readlines()
         try:
             start = max(0, int(start_line) - 1)
-            end = int(end_line) if end_line not in (0, "", None) else 0
         except ValueError:
-            return f"Invalid line numbers: start_line={start_line}, end_line={end_line}"
+            return f"Invalid start_line: {start_line}"
+        end = len(lines)
+        if end_line and end_line != "0":
+            try:
+                end = int(end_line)
+            except ValueError:
+                end = len(lines)
         if operation == "add":
             insert_pos = start
             lines.insert(insert_pos, content + "\n")
@@ -198,13 +200,32 @@ def move(src: str, dest: str) -> str:
         return f"Error moving: {str(e)}"
 
 
+def _console_encoding() -> str:
+    """Best-effort encoding of child-process console output on this OS."""
+    if platform.system() != "Windows":
+        return "utf-8"
+    try:
+        import ctypes
+
+        k = ctypes.windll.kernel32
+        cp = k.GetConsoleOutputCP() or k.GetOEMCP()
+        if cp == 65001:
+            return "utf-8"
+        if cp:
+            return f"cp{cp}"
+    except Exception:
+        pass
+    try:
+        return locale.getpreferredencoding(False) or "utf-8"
+    except Exception:
+        return "utf-8"
+
+
 def exec_cmd(cmd: str, timeout: int = 60) -> str:
     if not cmd:
         return "Error: Empty command"
-    if not _check_safety(cmd):
-        return "Error: Command blocked due to safety concerns"
     try:
-        encoding = "cp936" if platform.system() == "Windows" else "utf-8"
+        encoding = _console_encoding()
         result = subprocess.run(
             cmd,
             shell=True,
@@ -237,11 +258,11 @@ ACTION_HANDLERS = {
     "list_dir":    lambda p: list_dir(p[0]),
     "make_dir":    lambda p: create_dir(p[0]),
     "create_file": lambda p: create_file(p[0]),
-    "delete_dir":  lambda p: delete(p[0]),
+    "delete_dir":  lambda p: delete(p[0], True),
     "rename_dir":  lambda p: rename(p[0], p[1]),
     "read_file":   lambda p: read_file(p[0], p[1], p[2]),
     "write_file":  lambda p: write_file(p[0], p[1]),
-    "delete_file": lambda p: delete(p[0]),
+    "delete_file": lambda p: delete(p[0], False),
     "edit_file":   lambda p: edit_file(p[0], p[1], p[2], p[3], p[4]),
     "rename_file": lambda p: rename(p[0], p[1]),
     "copy":        lambda p: copy(p[0], p[1]),

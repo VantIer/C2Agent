@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,7 +26,6 @@ const (
 // must honor ctx cancellation and return *NetworkError / *TimeoutError for
 // transport problems.
 type Backend interface {
-	Kind() Kind
 	// Execute runs a high-level action (name matches the LLM tool schema).
 	Execute(ctx context.Context, action string, params map[string]any) (string, error)
 	// Upload sends a local file to destPath on the controlled end.
@@ -46,6 +46,16 @@ func (e *NetworkError) Error() string { return "network error: " + e.Reason }
 // NewNetworkError builds a NetworkError.
 func NewNetworkError(format string, args ...any) *NetworkError {
 	return &NetworkError{Reason: fmt.Sprintf(format, args...)}
+}
+
+// BaseName returns the last path element of p, treating both '/' and '\' as
+// separators. The controlled end may run a different OS than the C2, so
+// filepath.Base (which only knows the local separator) is not sufficient.
+func BaseName(p string) string {
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }
 
 // TimeoutError marks an execution that exceeded cmd_timeout.
@@ -140,10 +150,17 @@ func (a *Agent) Stopped() bool {
 	}
 }
 
+// Done returns a channel that is closed when the agent is closed. Callers
+// waiting on a job result should select on it so a job enqueued just before
+// Close cannot block forever.
+func (a *Agent) Done() <-chan struct{} { return a.stop }
+
 // Close stops the dispatcher and closes the backend. Idempotent.
 func (a *Agent) Close() {
-	a.stopOnce.Do(func() { close(a.stop) })
-	if a.Backend != nil {
-		_ = a.Backend.Close()
-	}
+	a.stopOnce.Do(func() {
+		close(a.stop)
+		if a.Backend != nil {
+			_ = a.Backend.Close()
+		}
+	})
 }

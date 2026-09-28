@@ -13,11 +13,19 @@ type Registry struct {
 	agents   map[string]*Agent
 	activeID string
 	botSeq   int
+	onRemove []func(*Agent)
 }
 
 // NewRegistry creates an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{agents: make(map[string]*Agent)}
+}
+
+// AddRemoveListener registers fn to be called when an agent is unregistered.
+func (r *Registry) AddRemoveListener(fn func(*Agent)) {
+	r.mu.Lock()
+	r.onRemove = append(r.onRemove, fn)
+	r.mu.Unlock()
 }
 
 // Register adds an agent, replacing (and closing) any prior connection with
@@ -52,9 +60,13 @@ func (r *Registry) UnregisterAgent(a *Agent) {
 	if r.activeID == a.ID {
 		r.activeID = firstByOrder(r.agents)
 	}
+	listeners := append([]func(*Agent){}, r.onRemove...)
 	r.mu.Unlock()
 
 	a.Close()
+	for _, fn := range listeners {
+		fn(a)
+	}
 }
 
 // Get returns the agent with the given id, or nil.

@@ -97,6 +97,9 @@ func (s *Server) acceptLoop() {
 			case <-s.stop:
 				return
 			default:
+				// Back off on persistent accept errors (e.g. EMFILE) instead
+				// of spinning tightly.
+				time.Sleep(100 * time.Millisecond)
 				continue
 			}
 		}
@@ -110,8 +113,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
 	id := s.opts.Registry.NextBotID(s.opts.BotPrefix)
-	marker := randMarker()
-	b := newBackend(id, conn, marker)
+	b := newBackend(id, conn)
 	s.conns.Store(conn, struct{}{})
 	defer s.conns.Delete(conn)
 	go b.readLoop()
@@ -153,7 +155,8 @@ func (s *Server) probeOS(b *Backend) string {
 		out, err := b.request(ctx, p.cmd)
 		cancel()
 		if err != nil {
-			return "Unknown"
+			// Try the next probe rather than giving up on a transient error.
+			continue
 		}
 		if strings.Contains(strings.ToLower(out), p.keyword) {
 			return p.os

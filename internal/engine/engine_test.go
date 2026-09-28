@@ -30,16 +30,25 @@ func TestErrorEmitsDone(t *testing.T) {
 	cfg.Policy.AuthMode = 2
 	eng := NewWithClient(cfg, reg, errLLM{})
 	s, _ := eng.NewSession("a1", "")
-	ch, unsub := eng.Subscribe("", s.ID)
+	ch, _, unsub := eng.Subscribe("", s.ID)
 	defer unsub()
 	if err := eng.BeginChat(s.ID, "hi"); err != nil {
 		t.Fatal(err)
 	}
+	sawLLMError := false
 	deadline := time.After(3 * time.Second)
 	for {
 		select {
 		case ev := <-ch:
-			if ev["type"] == "done" {
+			switch ev["type"] {
+			case "llm_error":
+				sawLLMError = true
+			case "error":
+				t.Fatal("LLM failure must not use the generic 'error' event")
+			case "done":
+				if !sawLLMError {
+					t.Fatal("llm_error must be emitted before the terminal 'done'")
+				}
 				return
 			}
 		case <-deadline:
@@ -53,7 +62,6 @@ type fakeBackend struct {
 	actions []string
 }
 
-func (f *fakeBackend) Kind() agent.Kind { return agent.KindShell }
 func (f *fakeBackend) Execute(_ context.Context, action string, _ map[string]any) (string, error) {
 	f.mu.Lock()
 	f.actions = append(f.actions, action)
@@ -212,6 +220,114 @@ func TestSnapshotPendingJSON(t *testing.T) {
 	txt := string(data)
 	if !strings.Contains(txt, `"action":"exec_cmd"`) || !strings.Contains(txt, `"command":"id"`) {
 		t.Fatalf("pending not serialized with lowercase keys: %s", txt)
+	}
+}
+
+// An execution failure (timeout / disconnect) must be reported as
+// "execution_error" so the UI renders it as command output, not as an AI
+// conversation message, and must never use the generic "error" event.
+type errBackend struct{ fakeBackend }
+
+func (b *errBackend) Execute(context.Context, string, map[string]any) (string, error) {
+	return "", agent.NewNetworkError("boom")
+}
+
+func TestExecutionErrorEmitsEvent(t *testing.T) {
+	reg := agent.NewRegistry()
+	reg.Register(agent.New(agent.Options{ID: "a1", Kind: agent.KindShell, OS: "Linux", Backend: &errBackend{}}))
+	cfg := config.Default()
+	cfg.Policy.AuthMode = 2
+	cfg.Policy.RoundLimit = 5
+	el := &fakeLLM{turns: []*llm.ChatResult{
+		toolTurn("", "c1", "exec_cmd", `{"command":"sleep 100"}`),
+	}}
+	eng := NewWithClient(cfg, reg, el)
+	s, _ := eng.NewSession("a1", "")
+	ch, _, unsub := eng.Subscribe("", s.ID)
+	defer unsub()
+	if err := eng.BeginChat(s.ID, "go"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-ch:
+			switch ev["type"] {
+			case "execution_error":
+				if ev["error"] == nil {
+					t.Fatal("execution_error without an error field")
+				}
+				// The failure must be persisted as a result entry so a page
+				// refresh replays the same thing (and never "[Network Error]").
+				tr := eng.GetTranscript(s.ID)
+				found := false
+				for _, e := range tr {
+					if e.Role == "result" && strings.Contains(e.Text, "Error: network error: boom") {
+						found = true
+					}
+					if strings.Contains(e.Text, "[Network Error]") {
+						t.Fatalf("stale network-error transcript entry: %q", e.Text)
+					}
+				}
+				if !found {
+					t.Fatalf("execution error not persisted as a result: %+v", tr)
+				}
+				return
+			case "error":
+				t.Fatal("job failure must not use the generic 'error' event")
+			}
+		case <-deadline:
+			t.Fatal("no execution_error event emitted")
+		}
+	}
+}
+
+// An offline agent must be reported as "agent_error" (rendered like a command
+// result), never as the generic "error" conversation message, and the turn's
+// user message plus the error must be persisted for history replay.
+func TestAgentOfflineEmitsAgentError(t *testing.T) {
+	br := &fakeBackend{}
+	reg := newTestAgent(t, br)
+	cfg := config.Default()
+	cfg.Policy.AuthMode = 2
+	eng := NewWithClient(cfg, reg, &fakeLLM{})
+	s, err := eng.NewSession("a1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.UnregisterAgent(reg.Get("a1")) // agent goes offline before the turn
+
+	ch, _, unsub := eng.Subscribe("", s.ID)
+	defer unsub()
+	if err := eng.BeginChat(s.ID, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-ch:
+			switch ev["type"] {
+			case "agent_error":
+				tr := eng.GetTranscript(s.ID)
+				var hasUser, hasErr bool
+				for _, e := range tr {
+					if e.Role == "user" && e.Text == "hello" {
+						hasUser = true
+					}
+					if e.Role == "result" && strings.Contains(e.Text, "agent offline") {
+						hasErr = true
+					}
+				}
+				if !hasUser || !hasErr {
+					t.Fatalf("transcript missing user/error entries: %+v", tr)
+				}
+				return
+			case "error":
+				t.Fatal("agent offline must not use the generic 'error' event")
+			}
+		case <-deadline:
+			t.Fatal("no agent_error event emitted")
+		}
 	}
 }
 

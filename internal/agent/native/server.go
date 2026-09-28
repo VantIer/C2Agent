@@ -95,6 +95,9 @@ func (s *Server) acceptLoop() {
 			case <-s.stop:
 				return
 			default:
+				// Back off on persistent accept errors (e.g. EMFILE) instead
+				// of spinning tightly.
+				time.Sleep(100 * time.Millisecond)
 				continue
 			}
 		}
@@ -187,6 +190,12 @@ func (s *Server) handleConn(raw net.Conn) {
 			s.opts.Registry.UnregisterAgent(a)
 		},
 	})
+
+	if old := s.opts.Registry.Get(id); old != nil && (old.Hostname != host || old.OS != osName) {
+		s.logger.Printf("WARNING: duplicate agent id %q already held by %s/%s; replacing it with %s/%s. "+
+			"Agent ids must be unique per controlled end, otherwise the two connections will keep evicting each other.",
+			id, old.Hostname, old.OS, host, osName)
+	}
 
 	s.opts.Registry.Register(ag)
 	s.logger.Printf("native agent registered: id=%s host=%s os=%s", id, host, osName)

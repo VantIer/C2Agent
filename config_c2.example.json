@@ -32,7 +32,7 @@
     "auth_mode": 0,
     "round_limit": 20,
     "cmd_timeout": 60,
-    "timeout_action": "fail",
+    "timeout_action": "disconnect",
     "max_sessions_per_agent": 8,
     "queue_capacity": 256
   },

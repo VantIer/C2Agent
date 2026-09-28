@@ -66,8 +66,8 @@ func TestChaCha20EncryptRFC7539(t *testing.T) {
 // across partial-block boundaries.
 func TestChaCha20RoundTripAcrossBlocks(t *testing.T) {
 	key := DeriveKey("change-me-shared-token")
-	tx := NewChaCha20Stream(key[:], NonceC2ToAgent)
-	rx := NewChaCha20Stream(key[:], NonceC2ToAgent)
+	tx := NewChaCha20(key[:], NonceC2ToAgent, 0)
+	rx := NewChaCha20(key[:], NonceC2ToAgent, 0)
 
 	in := make([]byte, 5000)
 	for i := range in {

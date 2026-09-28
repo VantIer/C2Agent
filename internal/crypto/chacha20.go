@@ -56,9 +56,6 @@ func NewChaCha20(key, nonce []byte, counter uint32) *ChaCha20 {
 	return c
 }
 
-// NewChaCha20Stream creates a cipher starting at counter 0.
-func NewChaCha20Stream(key, nonce []byte) *ChaCha20 { return NewChaCha20(key, nonce, 0) }
-
 func rotl(x uint32, n uint) uint32 { return (x << n) | (x >> (32 - n)) }
 
 func quarterRound(a, b, c, d *uint32) {

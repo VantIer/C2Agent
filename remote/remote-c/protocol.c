@@ -98,6 +98,7 @@ int bb_take_packet(bytebuf_t *b, uint64_t *req_id, uint8_t *cmd,
     if (b->len - b->off < PACKET_HEADER_LEN) return 0;
     uint64_t rid = read_u64_le(b->data + b->off);
     uint32_t blen = read_u32_le(b->data + b->off + 8);
+    if (blen > PROTO_MAX_BODY_LEN) return -1; /* oversized body: protocol error */
     if (b->len - b->off < PACKET_HEADER_LEN + blen) return 0;
     *req_id = rid;
     *cmd = b->data[b->off + 15];
@@ -136,13 +137,13 @@ int tlv_encode(const char *const *params, int n, uint8_t **out, uint32_t *out_le
 }
 
 int tlv_decode(const uint8_t *body, uint32_t body_len, char ***out_params, int *out_count) {
-    uint32_t off = 0;
+    uint64_t off = 0;
     int n = 0;
     while (off < body_len) {
         if (off + 4 > body_len) return -1;
         uint32_t l = read_u32_le(body + off);
-        if (off + 4 + l > body_len) return -1;
-        off += 4 + l;
+        if (off + 4 + (uint64_t)l > body_len) return -1;
+        off += 4 + (uint64_t)l;
         n++;
     }
     char **arr = (char **)calloc((size_t)n + 1, sizeof(char *));
@@ -300,7 +301,7 @@ int is_dir(const char *p) {
 }
 
 static int mkdir_one(const char *p) {
-    return iru_mkdir(p);
+    return c2a_mkdir(p);
 }
 void mkdir_p(const char *path) {
     char tmp[PROTO_MAX_PATH];
@@ -432,7 +433,7 @@ char *oem_to_utf8(const char *s) { return cp_to_utf8(s, CP_OEMCP); }
 
 #endif /* _WIN32 */
 
-FILE *iru_fopen(const char *path, const char *mode) {
+FILE *c2a_fopen(const char *path, const char *mode) {
 #ifdef _WIN32
     wchar_t *wp = utf8_to_wide(path);
     wchar_t *wm = utf8_to_wide(mode);
@@ -445,7 +446,7 @@ FILE *iru_fopen(const char *path, const char *mode) {
 #endif
 }
 
-int iru_remove(const char *path) {
+int c2a_remove(const char *path) {
 #ifdef _WIN32
     wchar_t *wp = utf8_to_wide(path);
     int r = wp ? _wremove(wp) : -1;
@@ -456,7 +457,7 @@ int iru_remove(const char *path) {
 #endif
 }
 
-int iru_rmdir(const char *path) {
+int c2a_rmdir(const char *path) {
 #ifdef _WIN32
     wchar_t *wp = utf8_to_wide(path);
     int r = (wp && RemoveDirectoryW(wp)) ? 0 : -1;
@@ -467,7 +468,7 @@ int iru_rmdir(const char *path) {
 #endif
 }
 
-int iru_rename(const char *oldpath, const char *newpath) {
+int c2a_rename(const char *oldpath, const char *newpath) {
 #ifdef _WIN32
     wchar_t *wo = utf8_to_wide(oldpath);
     wchar_t *wn = utf8_to_wide(newpath);
@@ -480,7 +481,7 @@ int iru_rename(const char *oldpath, const char *newpath) {
 #endif
 }
 
-int iru_mkdir(const char *path) {
+int c2a_mkdir(const char *path) {
 #ifdef _WIN32
     wchar_t *wp = utf8_to_wide(path);
     int r = wp ? _wmkdir(wp) : -1;
@@ -491,7 +492,7 @@ int iru_mkdir(const char *path) {
 #endif
 }
 
-char *iru_getcwd(void) {
+char *c2a_getcwd(void) {
 #ifdef _WIN32
     DWORD cap = GetCurrentDirectoryW(0, NULL);
     if (cap == 0) return NULL;

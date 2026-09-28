@@ -32,11 +32,7 @@ async def read_one_packet(
     while True:
         pkt = pr.next_packet()
         if pkt is not None:
-            req_id, body_len, cmd_or_flag, body = pkt
-            if len(body) != body_len:
-                raise FileTransferError(
-                    f"packet body length mismatch: header={body_len}, got={len(body)}"
-                )
+            _req_id, _body_len, cmd_or_flag, body = pkt
             if cmd_or_flag in CONTROL_CMDS:
                 # Control packet (e.g. heartbeat_ack) interleaved during a
                 # transfer: skip it and keep waiting for data packets instead

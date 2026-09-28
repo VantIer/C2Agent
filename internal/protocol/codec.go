@@ -58,13 +58,13 @@ func DecodeTLV(buf []byte) ([]string, error) {
 		if i+4 > len(buf) {
 			return nil, errf("TLV truncated at %d", i)
 		}
-		n := int(binary.LittleEndian.Uint32(buf[i:]))
+		n := uint64(binary.LittleEndian.Uint32(buf[i:]))
 		i += 4
-		if n < 0 || i+n > len(buf) {
+		if n > uint64(len(buf)-i) {
 			return nil, errf("TLV overrun at %d (len=%d)", i, n)
 		}
-		out = append(out, string(buf[i:i+n]))
-		i += n
+		out = append(out, string(buf[i:i+int(n)]))
+		i += int(n)
 	}
 	return out, nil
 }

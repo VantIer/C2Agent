@@ -3,14 +3,18 @@
 package web
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,20 +30,48 @@ type Server struct {
 	cfg *config.Config
 	eng *engine.Engine
 	mux *http.ServeMux
+	srv *http.Server
 }
 
 // New creates the web server.
 func New(cfg *config.Config, eng *engine.Engine) *Server {
 	s := &Server{cfg: cfg, eng: eng, mux: http.NewServeMux()}
 	s.routes()
+	// Build the http.Server up front so Shutdown can never race with a
+	// ListenAndServe goroutine setting it. No WriteTimeout: the SSE endpoint
+	// is long-lived and would be cut off by one.
+	s.srv = &http.Server{
+		Addr:              fmt.Sprintf("%s:%d", cfg.Web.ListenHost, cfg.Web.ListenPort),
+		Handler:           s.originGuard(s.mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	return s
+}
+
+// originGuard rejects cross-origin requests so a malicious page cannot drive
+// the panel (CSRF), even though it listens on loopback by default.
+func (s *Server) originGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if o := r.Header.Get("Origin"); o != "" {
+			u, err := url.Parse(o)
+			if err != nil || !strings.EqualFold(u.Host, r.Host) {
+				http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ListenAndServe starts the panel.
 func (s *Server) ListenAndServe() error {
-	addr := fmt.Sprintf("%s:%d", s.cfg.Web.ListenHost, s.cfg.Web.ListenPort)
-	srv := &http.Server{Addr: addr, Handler: s.mux}
-	return srv.ListenAndServe()
+	return s.srv.ListenAndServe()
+}
+
+// Shutdown gracefully stops the panel.
+func (s *Server) Shutdown(ctx context.Context) error {
+	return s.srv.Shutdown(ctx)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -70,7 +102,6 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/sessions/new", s.handleNewSession)
 	m.HandleFunc("POST /api/sessions/close", s.handleCloseSession)
 	m.HandleFunc("POST /api/sessions/activate", s.handleActivateSession)
-	m.HandleFunc("GET /api/session", s.handleSessionSnapshot)
 	m.HandleFunc("GET /api/history", s.handleHistory)
 	m.HandleFunc("POST /api/send", s.handleSend)
 	m.HandleFunc("POST /api/shutdown", s.handleShutdown)
@@ -144,10 +175,9 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0)
 	for _, sess := range s.eng.ListSessions(agentID) {
-		snap := sess.Snapshot()
 		out = append(out, map[string]any{
-			"id": sess.ID, "title": sess.Title, "running": snap.Running,
-			"phase": snap.Phase, "agent_id": sess.AgentID,
+			"id": sess.ID, "title": sess.Title, "running": sess.Running(),
+			"phase": sess.Phase(), "agent_id": sess.AgentID,
 		})
 	}
 	active := ""
@@ -207,15 +237,6 @@ func (s *Server) handleActivateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"success": true})
-}
-
-func (s *Server) handleSessionSnapshot(w http.ResponseWriter, r *http.Request) {
-	sess := s.eng.GetSession(r.URL.Query().Get("session_id"))
-	if sess == nil {
-		writeJSON(w, 404, map[string]any{"error": "session not found"})
-		return
-	}
-	writeJSON(w, 200, sess.Snapshot())
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
@@ -282,7 +303,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ch, unsub := s.eng.Subscribe("", sessionID)
+	ch, dropped, unsub := s.eng.Subscribe("", sessionID)
 	defer unsub()
 
 	snap := sess.Snapshot()
@@ -296,6 +317,10 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-dropped:
+			// The hub dropped this slow consumer; end the stream so the
+			// browser reconnects and gets a fresh snapshot.
 			return
 		case <-ping.C:
 			fmt.Fprint(w, ": ping\n\n")
@@ -390,8 +415,7 @@ func parseListing(text string) []map[string]any {
 		if m == nil {
 			continue
 		}
-		var size int
-		fmt.Sscanf(m[2], "%d", &size)
+		size, _ := strconv.Atoi(m[2])
 		items = append(items, map[string]any{"name": m[3], "is_dir": m[1] == "DIR", "size": size})
 	}
 	return items
@@ -422,7 +446,22 @@ func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]any{"error": err.Error()})
 		return
 	}
+	if msg, bad := listingError(out); bad {
+		writeJSON(w, 200, map[string]any{"path": path, "error": msg})
+		return
+	}
 	writeJSON(w, 200, map[string]any{"path": path, "items": parseListing(out), "raw": out})
+}
+
+// listingError reports a business error returned by the agent's list_dir, so
+// the UI is not shown an empty directory instead of the failure.
+func listingError(out string) (string, bool) {
+	t := strings.TrimSpace(out)
+	if strings.HasPrefix(t, "Error") || strings.HasPrefix(t, "Path does not exist") ||
+		strings.HasPrefix(t, "is a file") {
+		return t, true
+	}
+	return "", false
 }
 
 func (s *Server) fileAction(w http.ResponseWriter, r *http.Request, action string, keys ...string) {
@@ -454,7 +493,22 @@ func (s *Server) handleFileNew(w http.ResponseWriter, r *http.Request) {
 	s.fileAction(w, r, "create_file", "path")
 }
 func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
-	s.fileAction(w, r, "delete_file", "path")
+	var req map[string]any
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	action := "delete_file"
+	if b, ok := req["is_dir"].(bool); ok && b {
+		action = "delete_dir"
+	}
+	agentID, _ := req["agent_id"].(string)
+	out, err := s.eng.RunAction(agentID, action, map[string]any{"path": req["path"]})
+	if err != nil {
+		writeJSON(w, 503, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"result": out})
 }
 func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 	s.fileAction(w, r, "copy", "src", "dest")
@@ -475,7 +529,7 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]any{"error": err.Error()})
 		return
 	}
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+filepath.Base(dest)+"\"")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(dest)}))
 	http.ServeFile(w, r, dest)
 }
 

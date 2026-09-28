@@ -59,8 +59,8 @@ class AgentClient:
 
     def set_packet_handler(self, handler) -> None:
         self._on_packet = handler
-        if handler is not None and hasattr(handler, '_write_lock'):
-            handler._write_lock = self._write_lock
+        if handler is not None and hasattr(handler, "set_write_lock"):
+            handler.set_write_lock(self._write_lock)
 
     def next_request_id(self) -> int:
         rid = self._next_request_id
@@ -72,6 +72,8 @@ class AgentClient:
         while not self._stopped:
             try:
                 await self._connect_and_serve()
+                # A session completed normally; reset the reconnect backoff.
+                delay = self._reconnect_initial
             except asyncio.CancelledError:
                 raise
             except Exception as e:

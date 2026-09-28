@@ -18,6 +18,7 @@ const (
 	PhaseLLM      Phase = "llm"
 	PhaseExec     Phase = "exec"
 	PhaseAuthWait Phase = "auth_wait"
+	PhaseDone     Phase = "done"
 )
 
 // PendingCommand is an action awaiting user authorization.
@@ -47,6 +48,7 @@ type Session struct {
 	iter       int
 	turn       int
 	text       string
+	seq        uint64
 	pending    *PendingCommand
 	stop       bool
 	running    bool
@@ -54,12 +56,16 @@ type Session struct {
 	job        *agent.Job
 	runCtx     context.Context
 	cancel     context.CancelFunc
+	done       chan struct{}
 }
 
-func (s *Session) addTranscript(role, text string) {
+func (s *Session) addTranscript(role, text string) uint64 {
 	s.mu.Lock()
 	s.transcript = append(s.transcript, TranscriptEntry{Role: role, Text: text})
+	s.seq++
+	seq := s.seq
 	s.mu.Unlock()
+	return seq
 }
 
 func (s *Session) transcriptCopy() []TranscriptEntry {
@@ -72,32 +78,69 @@ func (s *Session) transcriptCopy() []TranscriptEntry {
 
 // Snapshot is a copy of session state for UI replay.
 type Snapshot struct {
-	ID        string          `json:"id"`
-	AgentID   string          `json:"agent_id"`
-	Title     string          `json:"title"`
-	Phase     Phase           `json:"phase"`
-	Iteration int             `json:"iteration"`
-	Turn      int             `json:"turn"`
-	Text      string          `json:"text"`
-	Pending   *PendingCommand `json:"pending,omitempty"`
-	Running   bool            `json:"running"`
+	ID         string            `json:"id"`
+	AgentID    string            `json:"agent_id"`
+	Title      string            `json:"title"`
+	Phase      Phase             `json:"phase"`
+	Iteration  int               `json:"iteration"`
+	Turn       int               `json:"turn"`
+	Text       string            `json:"text"`
+	Seq        uint64            `json:"seq"`
+	Pending    *PendingCommand   `json:"pending,omitempty"`
+	Running    bool              `json:"running"`
+	Transcript []TranscriptEntry `json:"transcript"`
 }
 
 // Snapshot returns a consistent copy of the session state.
 func (s *Session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	tr := make([]TranscriptEntry, len(s.transcript))
+	copy(tr, s.transcript)
 	return Snapshot{
 		ID: s.ID, AgentID: s.AgentID, Title: s.Title,
 		Phase: s.phase, Iteration: s.iter, Turn: s.turn,
 		Text: s.text, Pending: s.pending, Running: s.running,
+		Transcript: tr, Seq: s.seq,
 	}
+}
+
+// publishNow assigns the next event sequence and broadcasts ev.
+func (e *Engine) publishNow(s *Session, ev Event) {
+	s.mu.Lock()
+	s.seq++
+	seq := s.seq
+	s.mu.Unlock()
+	ev["seq"] = seq
+	e.hub.publish(s.AgentID, s.ID, ev)
+}
+
+// publish broadcasts ev carrying a sequence already assigned under the session
+// lock (used when the state mutation and the seq increment are atomic).
+func (e *Engine) publish(s *Session, seq uint64, ev Event) {
+	ev["seq"] = seq
+	e.hub.publish(s.AgentID, s.ID, ev)
 }
 
 func (s *Session) isStopped() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.stop
+}
+
+// Phase returns the current conversation phase (cheap status accessor).
+func (s *Session) Phase() Phase {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.phase
+}
+
+// Running reports whether a conversation is currently in progress (cheap
+// status accessor that does not copy the transcript like Snapshot does).
+func (s *Session) Running() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running
 }
 
 func (s *Session) historyCopy() []llm.Message {
@@ -112,23 +155,25 @@ func (s *Session) historyCopy() []llm.Message {
 func (e *Engine) runConversation(s *Session, message string) {
 	defer e.finish(s)
 
-	ag := e.registry.Get(s.AgentID)
-	if ag == nil {
-		e.hub.publish(s.AgentID, s.ID, Event{"type": "error", "error": "agent offline"})
-		return
-	}
-
 	s.mu.Lock()
 	s.history = append(s.history, llm.UserMessage(message))
 	s.mu.Unlock()
 	s.addTranscript("user", message)
+
+	ag := e.registry.Get(s.AgentID)
+	if ag == nil {
+		const msg = "Error: agent offline"
+		seq := s.addTranscript("result", msg)
+		e.publish(s, seq, Event{"type": "agent_error", "error": "agent offline"})
+		return
+	}
 
 	system := e.RenderSystemPrompt(ag.OS)
 	round := 0
 
 	for round < e.cfg.Policy.RoundLimit {
 		if s.isStopped() {
-			e.hub.publish(s.AgentID, s.ID, Event{"type": "stopped"})
+			e.publishNow(s, Event{"type": "stopped"})
 			return
 		}
 		round++
@@ -142,25 +187,24 @@ func (e *Engine) runConversation(s *Session, message string) {
 		ctx := s.runCtx
 		s.mu.Unlock()
 
-		e.hub.publish(s.AgentID, s.ID, Event{"type": "answering", "iteration": round, "turn": turn})
+		e.publishNow(s, Event{"type": "answering", "iteration": round, "turn": turn})
 
 		msgs := e.buildMessages(s, system)
 		res, err := e.llm.Chat(ctx, msgs, e.tools, func(chunk string) {
 			s.mu.Lock()
 			s.text += chunk
+			s.seq++
+			seq := s.seq
 			s.mu.Unlock()
-			e.hub.publish(s.AgentID, s.ID, Event{"type": "chunk", "content": chunk})
+			e.publish(s, seq, Event{"type": "chunk", "content": chunk})
 		})
 		if err != nil {
 			if s.isStopped() {
-				e.hub.publish(s.AgentID, s.ID, Event{"type": "stopped"})
+				e.publishNow(s, Event{"type": "stopped"})
 				return
 			}
-			e.hub.publish(s.AgentID, s.ID, Event{"type": "error", "error": err.Error()})
-			s.mu.Lock()
-			s.history = append(s.history, llm.UserMessage("[LLM Error] "+err.Error()))
-			s.mu.Unlock()
-			s.addTranscript("system", "[LLM Error] "+err.Error())
+			seq := s.addTranscript("system", "[LLM Error] "+err.Error())
+			e.publish(s, seq, Event{"type": "llm_error", "error": err.Error()})
 			return
 		}
 
@@ -175,28 +219,35 @@ func (e *Engine) runConversation(s *Session, message string) {
 		if len(res.ToolCalls) == 0 {
 			break
 		}
-		e.hub.publish(s.AgentID, s.ID, Event{"type": "response_done", "iteration": round, "commands": toolCallsJSON(res.ToolCalls)})
+		e.publishNow(s, Event{"type": "response_done", "iteration": round, "commands": toolCallsJSON(res.ToolCalls)})
 
 		denied := false
 		for i, tc := range res.ToolCalls {
 			if s.isStopped() {
-				e.hub.publish(s.AgentID, s.ID, Event{"type": "stopped"})
+				for _, rest := range res.ToolCalls[i:] {
+					e.appendToolRaw(s, rest.ID, "Error: aborted before execution")
+				}
+				e.publishNow(s, Event{"type": "stopped"})
 				return
 			}
 			action := tc.Name
 			params, perr := parseArgs(tc.Arguments)
 			if perr != nil {
-				e.appendTool(s, tc.ID, action, "Error: invalid arguments: "+perr.Error())
+				msg := "Error: invalid arguments: " + perr.Error()
+				seq := e.appendTool(s, tc.ID, action, msg)
+				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
 				continue
 			}
 			if _, known := command.SpecByName(action); !known {
-				e.appendTool(s, tc.ID, action, "Error: unknown action: "+action)
+				msg := "Error: unknown action: " + action
+				seq := e.appendTool(s, tc.ID, action, msg)
+				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
 				continue
 			}
 			if !command.CheckSafety(action, params) {
 				msg := "Error: blocked by safety check"
-				e.appendTool(s, tc.ID, action, msg)
-				e.hub.publish(s.AgentID, s.ID, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
+				seq := e.appendTool(s, tc.ID, action, msg)
+				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
 				continue
 			}
 
@@ -209,7 +260,7 @@ func (e *Engine) runConversation(s *Session, message string) {
 				s.phase = PhaseAuthWait
 				s.authCh = authCh
 				s.mu.Unlock()
-				e.hub.publish(s.AgentID, s.ID, Event{"type": "auth_required", "action": action, "params": params})
+				e.publishNow(s, Event{"type": "auth_required", "action": action, "params": params})
 				ok := e.awaitAuth(s, authCh)
 				s.mu.Lock()
 				s.pending = nil
@@ -218,7 +269,10 @@ func (e *Engine) runConversation(s *Session, message string) {
 				}
 				s.mu.Unlock()
 				if s.isStopped() {
-					e.hub.publish(s.AgentID, s.ID, Event{"type": "stopped"})
+					for _, rest := range res.ToolCalls[i:] {
+						e.appendToolRaw(s, rest.ID, "Error: aborted before execution")
+					}
+					e.publishNow(s, Event{"type": "stopped"})
 					return
 				}
 				if !ok {
@@ -228,11 +282,11 @@ func (e *Engine) runConversation(s *Session, message string) {
 					// model cannot immediately work around the denial.
 					const deniedMsg = "Error: user denied command execution (not executed)"
 					e.appendToolRaw(s, tc.ID, deniedMsg)
-					s.addTranscript("system", "Denied: "+action+" (not executed)")
+					seq := s.addTranscript("system", "Denied: "+action+" (not executed)")
 					for _, rest := range res.ToolCalls[i+1:] {
 						e.appendToolRaw(s, rest.ID, "Error: skipped because a previous command was denied")
 					}
-					e.hub.publish(s.AgentID, s.ID, Event{"type": "execution_denied", "action": action, "params": params})
+					e.publish(s, seq, Event{"type": "execution_denied", "action": action, "params": params})
 					denied = true
 					break
 				}
@@ -242,37 +296,57 @@ func (e *Engine) runConversation(s *Session, message string) {
 			s.mu.Lock()
 			s.phase = PhaseExec
 			s.mu.Unlock()
-			e.hub.publish(s.AgentID, s.ID, Event{"type": "executing", "action": action, "params": params})
+			e.publishNow(s, Event{"type": "executing", "action": action, "params": params})
 
 			job := agent.NewJob(agent.JobAction)
 			job.Action = action
 			job.Params = params
 			if err := ag.Enqueue(job); err != nil {
-				e.appendTool(s, tc.ID, action, "Error: agent offline")
+				msg := "Error: agent offline"
+				seq := e.appendTool(s, tc.ID, action, msg)
+				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
 				continue
 			}
 			s.mu.Lock()
 			s.job = job
 			s.mu.Unlock()
-			r := <-job.Result
+			var r agent.JobResult
+			select {
+			case r = <-job.Result:
+			default:
+				select {
+				case r = <-job.Result:
+				case <-ag.Done():
+					select {
+					case r = <-job.Result:
+					default:
+						r = agent.JobResult{Err: agent.ErrClosed}
+					}
+				}
+			}
 			s.mu.Lock()
 			s.job = nil
 			s.mu.Unlock()
 
 			if r.Err != nil {
 				if r.Err == agent.ErrClosed {
-					e.appendTool(s, tc.ID, action, "Error: agent offline")
+					msg := "Error: agent offline"
+					seq := e.appendTool(s, tc.ID, action, msg)
+					e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
 					continue
 				}
-				e.hub.publish(s.AgentID, s.ID, Event{"type": "error", "error": r.Err.Error()})
-				s.mu.Lock()
-				s.history = append(s.history, llm.UserMessage("[Network Error] "+r.Err.Error()))
-				s.mu.Unlock()
-				s.addTranscript("system", "[Network Error] "+r.Err.Error())
+				// Persist the failure as this tool call's result so history
+				// replay matches the live view, and answer the remaining tool
+				// calls so the assistant/tool message sequence stays valid.
+				seq := e.appendTool(s, tc.ID, action, "Error: "+r.Err.Error())
+				for _, rest := range res.ToolCalls[i+1:] {
+					e.appendToolRaw(s, rest.ID, "Error: skipped because the agent connection failed")
+				}
+				e.publish(s, seq, Event{"type": "execution_error", "action": action, "params": params, "error": r.Err.Error()})
 				return
 			}
-			e.appendTool(s, tc.ID, action, r.Output)
-			e.hub.publish(s.AgentID, s.ID, Event{"type": "execution_done", "action": action, "params": params, "result": r.Output})
+			seq := e.appendTool(s, tc.ID, action, r.Output)
+			e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": r.Output})
 		}
 		if denied {
 			break
@@ -288,14 +362,20 @@ func (e *Engine) finish(s *Session) {
 	s.running = false
 	s.phase = PhaseIdle
 	s.stop = false
+	s.pending = nil
 	s.job = nil
+	runDone := s.done
+	s.done = nil
 	if s.cancel != nil {
 		s.cancel()
 		s.cancel = nil
 	}
 	s.mu.Unlock()
 	if running {
-		e.hub.publish(s.AgentID, s.ID, Event{"type": "done"})
+		e.publishNow(s, Event{"type": "done"})
+	}
+	if runDone != nil {
+		close(runDone)
 	}
 }
 
@@ -307,26 +387,28 @@ func (e *Engine) buildMessages(s *Session, system string) []llm.Message {
 	return msgs
 }
 
-func (e *Engine) appendTool(s *Session, id, label, content string) {
+func (e *Engine) appendTool(s *Session, id, label, content string) uint64 {
 	if content == "" {
 		content = "(no output)"
 	}
 	s.mu.Lock()
 	s.history = append(s.history, llm.ToolMessage(content, id))
-	if label != "" {
-		s.transcript = append(s.transcript, TranscriptEntry{Role: "result", Text: "[" + label + "]\n" + content})
-	} else {
-		s.transcript = append(s.transcript, TranscriptEntry{Role: "result", Text: content})
-	}
+	s.transcript = append(s.transcript, TranscriptEntry{Role: "result", Text: "[" + label + "]\n" + content})
+	s.seq++
+	seq := s.seq
 	s.mu.Unlock()
+	return seq
 }
 
 // appendToolRaw appends only the tool message to the LLM history (used for
 // denials / skips, whose transcript rendering is handled separately).
-func (e *Engine) appendToolRaw(s *Session, id, content string) {
+func (e *Engine) appendToolRaw(s *Session, id, content string) uint64 {
 	s.mu.Lock()
 	s.history = append(s.history, llm.ToolMessage(content, id))
+	s.seq++
+	seq := s.seq
 	s.mu.Unlock()
+	return seq
 }
 
 func toolCallsJSON(calls []llm.ToolCall) []map[string]any {

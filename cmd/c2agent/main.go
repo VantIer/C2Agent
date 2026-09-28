@@ -4,9 +4,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"c2agent/internal/agent"
@@ -73,15 +77,38 @@ func main() {
 		logger.Fatal("no controlled-end listener enabled (native.enabled / shell.enabled)")
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	eng := engine.New(cfg, reg)
 
 	switch *mode {
 	case "cli":
-		cli.Run(cfg, eng)
+		done := make(chan struct{})
+		go func() {
+			cli.Run(cfg, eng)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			logger.Printf("interrupt received; shutting down")
+		}
 	case "web":
+		srv := web.New(cfg, eng)
+		webErr := make(chan error, 1)
+		go func() { webErr <- srv.ListenAndServe() }()
 		logger.Printf("web panel on http://%s:%d", cfg.Web.ListenHost, cfg.Web.ListenPort)
-		if err := web.New(cfg, eng).ListenAndServe(); err != nil {
-			logger.Fatalf("web: %v", err)
+		select {
+		case <-ctx.Done():
+			logger.Printf("interrupt received; shutting down")
+			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = srv.Shutdown(shutCtx)
+			cancel()
+		case err := <-webErr:
+			if err != nil && err != http.ErrServerClosed {
+				logger.Fatalf("web: %v", err)
+			}
 		}
 	default:
 		logger.Fatalf("unknown mode %q (use cli|web)", *mode)

@@ -14,7 +14,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from common.protocol import (
     ACTION_CMDS,
@@ -49,12 +49,16 @@ class Handler:
     def __init__(
         self,
         cmd_timeout: int = 60,
-        on_shutdown: Optional[callable] = None,
+        on_shutdown: Optional[Callable] = None,
     ) -> None:
         self._cmd_timeout = cmd_timeout
         self._reader = PacketReader()
         self._write_lock: Optional[asyncio.Lock] = None
         self._on_shutdown = on_shutdown
+
+    def set_write_lock(self, lock: asyncio.Lock) -> None:
+        """Inject the connection's write lock (called by AgentClient)."""
+        self._write_lock = lock
 
     def feed(self, data: bytes) -> None:
         self._reader.feed(data)
@@ -173,6 +177,7 @@ class Handler:
             target.parent.mkdir(parents=True, exist_ok=True)
             fileobj = open(target, "wb")
         except Exception as e:
+            await self._drain_upload(reader)
             await self._write_packet(writer, encode_response(req_id, CMD_UPLOAD, f"Error: cannot create file: {e}"))
             return
         total = 0
@@ -189,10 +194,10 @@ class Handler:
                 if end_flag == END_FLAG_LAST:
                     success = True
                     break
-        except FileTransferError:
-            pass
+        except FileTransferError as e:
+            logger.warning("upload interrupted: %s", e)
         except Exception:
-            pass
+            logger.exception("upload failed")
         finally:
             fileobj.close()
         if success:
@@ -204,8 +209,23 @@ class Handler:
                 target.unlink()
             except OSError:
                 pass
+            await self._drain_upload(reader)
             logger.debug(f"exec result req_id={req_id} action=upload -> Error: upload failed")
             await self._write_packet(writer, encode_response(req_id, CMD_UPLOAD, "Error: upload failed"))
+
+    async def _drain_upload(self, reader: asyncio.StreamReader) -> None:
+        """Consume a failed upload's remaining data packets so the serve loop
+        does not misparse them as commands."""
+        try:
+            while True:
+                pkt = await read_one_packet(reader, self._reader)
+                if pkt is None:
+                    return
+                end_flag, _data = pkt
+                if end_flag == END_FLAG_LAST:
+                    return
+        except Exception:
+            return
 
     async def _handle_download(
         self,

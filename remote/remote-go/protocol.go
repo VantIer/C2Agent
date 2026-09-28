@@ -172,7 +172,8 @@ func buildDataPacket(reqID uint64, endFlag uint8, data []byte) []byte {
 }
 
 // readPacket pulls one complete packet from pr, fetching from conn as needed.
-// It ignores interleaved control packets (heartbeat acks) during transfers.
+// Callers (e.g. handleUpload) are responsible for skipping interleaved control
+// packets (heartbeat acks) during transfers.
 func readPacket(conn net.Conn, pr *packetReader, timeout time.Duration) (*packet, error) {
 	buf := make([]byte, 4096)
 	deadline := time.Now().Add(timeout)

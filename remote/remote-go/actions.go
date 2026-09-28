@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 func arg(params []string, i int) string {
@@ -29,8 +30,10 @@ func runAction(cmd uint8, params []string, cmdTimeout time.Duration) string {
 		return makeDir(arg(params, 0))
 	case cmdCreateFile:
 		return createFile(arg(params, 0))
-	case cmdDeleteDir, cmdDeleteFile:
-		return deletePath(arg(params, 0))
+	case cmdDeleteDir:
+		return deletePath(arg(params, 0), true)
+	case cmdDeleteFile:
+		return deletePath(arg(params, 0), false)
 	case cmdRenameDir, cmdRenameFile:
 		return renamePath(arg(params, 0), arg(params, 1))
 	case cmdReadFile:
@@ -121,12 +124,20 @@ func createFile(path string) string {
 	return "Successfully created file: " + path
 }
 
-func deletePath(path string) string {
-	if _, err := os.Stat(path); err != nil {
+func deletePath(path string, wantDir bool) string {
+	info, err := os.Stat(path)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return "Path does not exist: " + path
 		}
 		return "Error deleting: " + err.Error()
+	}
+	if info.IsDir() != wantDir {
+		kind := "file"
+		if wantDir {
+			kind = "directory"
+		}
+		return "Error: not a " + kind + ": " + path
 	}
 	if err := os.RemoveAll(path); err != nil {
 		return "Error deleting: " + err.Error()
@@ -169,7 +180,12 @@ func readFile(path, startLine, endLine string) string {
 	content := string(data)
 	if startLine == "" || startLine == "0" {
 		if len(content) > readFileLimit {
-			return content[:readFileLimit]
+			cut := readFileLimit
+			// Do not split a multi-byte UTF-8 sequence at the truncation point.
+			for cut > 0 && !utf8.RuneStart(content[cut]) {
+				cut--
+			}
+			return content[:cut]
 		}
 		return content
 	}

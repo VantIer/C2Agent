@@ -85,7 +85,7 @@ type Transfer struct {
 func Default() *Config {
 	return &Config{
 		LLM: LLM{
-			APIBase:      "http://localhost/v1",
+			APIBase:      "http://localhost:11434/v1",
 			APIKey:       "deepseek",
 			Model:        "deepseek",
 			Temperature:  0.7,
@@ -129,7 +129,7 @@ func Load(path string) (*Config, error) {
 			if !os.IsNotExist(err) {
 				return nil, fmt.Errorf("read config: %w", err)
 			}
-		} else {
+		} else if len(strings.TrimSpace(string(data))) > 0 {
 			if err := json.Unmarshal(data, cfg); err != nil {
 				return nil, fmt.Errorf("parse config %s: %w", path, err)
 			}
@@ -185,12 +185,25 @@ func (c *Config) normalize() error {
 	if c.Native.Enabled && strings.TrimSpace(c.Native.AuthToken) == "" {
 		return fmt.Errorf("native.enabled=true requires a non-empty native.auth_token")
 	}
+	if c.Native.Enabled && (c.Native.ListenPort < 1 || c.Native.ListenPort > 65535) {
+		return fmt.Errorf("native.listen_port out of range: %d", c.Native.ListenPort)
+	}
+	if c.Shell.Enabled && (c.Shell.ListenPort < 1 || c.Shell.ListenPort > 65535) {
+		return fmt.Errorf("shell.listen_port out of range: %d", c.Shell.ListenPort)
+	}
+	if c.Native.Enabled && c.Policy.CmdTimeout < c.Native.HeartbeatTimeoutSec {
+		return fmt.Errorf("policy.cmd_timeout (%ds) must be >= native.heartbeat_timeout_sec (%ds)",
+			c.Policy.CmdTimeout, c.Native.HeartbeatTimeoutSec)
+	}
 	if c.Native.Enabled && c.Shell.Enabled && c.Native.ListenPort == c.Shell.ListenPort &&
-		c.Native.ListenHost == c.Shell.ListenHost {
+		hostsConflict(c.Native.ListenHost, c.Shell.ListenHost) {
 		return fmt.Errorf("native and shell listeners share %s:%d", c.Native.ListenHost, c.Native.ListenPort)
 	}
 	if c.Web.ListenPort == 0 {
 		c.Web.ListenPort = 8880
+	}
+	if c.Web.ListenPort < 1 || c.Web.ListenPort > 65535 {
+		return fmt.Errorf("web.listen_port out of range: %d", c.Web.ListenPort)
 	}
 	return nil
 }
@@ -227,6 +240,16 @@ func (c *Config) UlDir() (string, error) {
 		return "", err
 	}
 	return dir, nil
+}
+
+// hostsConflict reports whether two listen hosts would bind the same address,
+// treating a wildcard host as conflicting with anything on the same port.
+func hostsConflict(a, b string) bool {
+	if a == b {
+		return true
+	}
+	wild := func(h string) bool { return h == "" || h == "0.0.0.0" || h == "::" || h == "[::]" }
+	return wild(a) || wild(b)
 }
 
 func expandUser(p string) string {

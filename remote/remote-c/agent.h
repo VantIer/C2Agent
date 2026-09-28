@@ -1,6 +1,6 @@
-/* agent.h - common declarations for the Irudo C remote agent. */
-#ifndef IRUDO_AGENT_H
-#define IRUDO_AGENT_H
+/* agent.h - common declarations for the C2Agent C remote agent. */
+#ifndef C2AGENT_REMOTE_AGENT_H
+#define C2AGENT_REMOTE_AGENT_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -20,6 +20,7 @@
 #include <direct.h>
 #include <wchar.h>
 #include <shellapi.h>
+#include <errno.h>
 #define sock_close(s) closesocket(s)
 #define SOCK_ERR INVALID_SOCKET
 typedef SOCKET sockfd_t;
@@ -46,6 +47,8 @@ typedef int sockfd_t;
 #define DATA_CHUNK_SIZE   1024
 #define PROTO_MAX_PATH    4096
 #define READ_FILE_LIMIT   51200
+/* Upper bound on a single packet body (32 MiB), matching the Go control end. */
+#define PROTO_MAX_BODY_LEN (32u << 20)
 
 /* Action commands (C2 -> Agent). */
 #define CMD_LIST_DIR      0x01
@@ -79,9 +82,9 @@ typedef int sockfd_t;
 
 /* portable printf conversion specifier for unsigned long long */
 #ifdef _WIN32
-#define IRU_ULL "I64u"
+#define C2A_ULL "I64u"
 #else
-#define IRU_ULL "llu"
+#define C2A_ULL "llu"
 #endif
 
 /* ---------- incoming stream buffer ----------
@@ -160,12 +163,12 @@ char    *oem_to_utf8(const char *s);
    to UTF-16 and call the wide-character CRT/Win32 APIs so non-ASCII (e.g.
    Chinese) paths work; on POSIX they map straight to the byte-oriented
    standard calls. ---------- */
-FILE    *iru_fopen(const char *path, const char *mode);
-int      iru_remove(const char *path);
-int      iru_rmdir(const char *path);
-int      iru_rename(const char *oldpath, const char *newpath);
-int      iru_mkdir(const char *path);
-char    *iru_getcwd(void);
+FILE    *c2a_fopen(const char *path, const char *mode);
+int      c2a_remove(const char *path);
+int      c2a_rmdir(const char *path);
+int      c2a_rename(const char *oldpath, const char *newpath);
+int      c2a_mkdir(const char *path);
+char    *c2a_getcwd(void);
 
 /* ---------- self-contained SHA-256 (implemented in protocol.c) ---------- */
 void     sha256_digest(const void *data, size_t len, uint8_t out[32]);
@@ -187,4 +190,4 @@ int   sb_append(strbuf_t *b, const char *d, size_t n);
 int   sb_printf(strbuf_t *b, const char *fmt, ...);
 char *sb_take(strbuf_t *b);
 
-#endif /* IRUDO_AGENT_H */
+#endif /* C2AGENT_REMOTE_AGENT_H */

@@ -24,6 +24,7 @@ BODY_LEN_OFFSET = 8
 CMD_OFFSET = 15
 
 DATA_CHUNK_SIZE = 1024
+MAX_BODY_LEN = 32 << 20  # upper bound on a single packet body (32 MiB)
 
 
 ACTION_CMDS = {
@@ -68,8 +69,6 @@ ACTION_NAME_TO_CMD = {v[0]: k for k, v in ACTION_CMDS.items()}
 
 END_FLAG_CONTINUE = 0
 END_FLAG_LAST = 1
-
-REQUEST_CMDS = set(ACTION_CMDS.keys()) | {CMD_UPLOAD, CMD_DOWNLOAD}
 
 
 class ProtocolError(Exception):
@@ -119,13 +118,6 @@ def decode_tlv(buf: bytes) -> List[str]:
     return out
 
 
-def encode_request(req_id: int, cmd: int, params: List[str]) -> bytes:
-    if cmd not in REQUEST_CMDS:
-        raise ProtocolError(f"unknown request cmd: {cmd:#x}")
-    body = encode_tlv(params)
-    return encode_header(req_id, len(body), cmd) + body
-
-
 def encode_response(req_id: int, cmd: int, result: str) -> bytes:
     body = result.encode("utf-8")
     return encode_header(req_id, len(body), cmd) + body
@@ -164,6 +156,8 @@ class PacketReader:
             req_id, body_len, cmd = decode_header(bytes(self._buf))
         except ProtocolError:
             raise
+        if body_len > MAX_BODY_LEN:
+            raise ProtocolError(f"body too large: {body_len} > {MAX_BODY_LEN}")
         total = PACKET_HEADER_LEN + body_len
         if len(self._buf) < total:
             return None

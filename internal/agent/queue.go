@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 )
 
@@ -115,7 +116,9 @@ func (a *Agent) execJob(j *Job) {
 
 	out, err := a.dispatch(ctx, j)
 
-	if ctx.Err() == context.DeadlineExceeded && !j.Cancelled() {
+	if err != nil && errors.Is(err, context.DeadlineExceeded) && !j.Cancelled() {
+		// Only reclassify a genuine context timeout; never mask a business
+		// error that merely coincided with the deadline.
 		err = &TimeoutError{After: a.cmdTimeout}
 		if a.timeoutAction == "disconnect" && a.onTimeout != nil {
 			a.onTimeout(a)
