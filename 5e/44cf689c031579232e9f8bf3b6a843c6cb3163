@@ -1,0 +1,22 @@
+internal/web/ui/index.html
+  s_990c9ce3ea5e4c::t_df7b55b726e4b5 274
+  s_990c9ce3ea5e4c::t_dd9e737d72e8fa 281
+  s_990c9ce3ea5e4c::t_3592787c4e4fc4 262-269
+  s_990c9ce3ea5e4c::t_be184474d9efb4 293-294
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "5e44cf689c031579232e9f8bf3b6a843c6cb3163",
+  "prompts": {},
+  "sessions": {
+    "s_990c9ce3ea5e4c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f19624904ffemti4uJ5PshTjas",
+        "model": "unknown"
+      },
+      "human_author": "VantIer <vantler@live.cn>"
+    }
+  }
+}
