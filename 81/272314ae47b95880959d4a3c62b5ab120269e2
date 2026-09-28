@@ -1,0 +1,61 @@
+internal/web/ui/index.html
+  s_990c9ce3ea5e4c::t_1ad1b064b7344a 89-90,92-93,651,654,656-657,661-662
+  s_990c9ce3ea5e4c::t_39b59e7cb870ab 692
+  s_990c9ce3ea5e4c::t_e2b76cec2cfb8c 399
+  s_990c9ce3ea5e4c::t_f3179facb575cf 617,621
+  s_990c9ce3ea5e4c::t_6ee1fd8fc616b7 625
+  s_990c9ce3ea5e4c::t_e38d788bdbb3e8 576
+  s_990c9ce3ea5e4c::t_8c65644be8f0de 809
+  s_990c9ce3ea5e4c::t_944c27227d7f92 688
+  s_990c9ce3ea5e4c::t_40cae15539db24 246
+  s_990c9ce3ea5e4c::t_ae1fb9521d84c3 677-678
+  s_990c9ce3ea5e4c::t_105c5284e8e9bf 684
+  s_990c9ce3ea5e4c::t_2f32d21dfb2e6c 827-832,835-838
+  s_990c9ce3ea5e4c::t_8afea0572cdba0 652-653
+  s_990c9ce3ea5e4c::t_2a0892cfbb716b 655
+  s_990c9ce3ea5e4c::t_8b6e5b8fd76165 658-660
+internal/engine/engine.go
+  s_990c9ce3ea5e4c::t_40823a09e31126 207-212,214
+remote/remote-go/exec.go
+  s_990c9ce3ea5e4c::t_65f9ffcb803f0e 19
+remote/remote-go/exec_other.go
+  s_990c9ce3ea5e4c::t_51283c5b38dd48 5-14
+remote/remote-go/exec_windows.go
+  s_990c9ce3ea5e4c::t_59ec290794595d 15-16,21-30
+  s_990c9ce3ea5e4c::t_78b73ba593ded8 31
+internal/engine/session.go
+  s_990c9ce3ea5e4c::t_768618d6e96de1 153-156,158-159,161-174
+  s_990c9ce3ea5e4c::t_0e64bc0d939c32 175-177
+  s_990c9ce3ea5e4c::t_30ffda84f49b64 261
+  s_990c9ce3ea5e4c::t_f9fdb1e21b36f4 248
+  s_990c9ce3ea5e4c::t_73a876012f63d0 360
+  s_990c9ce3ea5e4c::t_082981041aeb15 402-416,420,423
+  s_990c9ce3ea5e4c::t_9450c287cc0869 193
+  s_990c9ce3ea5e4c::t_6977ef347f0fc1 293
+  s_990c9ce3ea5e4c::t_29259d7e6a96eb 255
+  s_990c9ce3ea5e4c::t_e4103aa1ae1ce7 324
+  s_990c9ce3ea5e4c::t_5cf7f52903302a 353
+  s_990c9ce3ea5e4c::t_0ba5ed5eec1959 220,223
+  s_990c9ce3ea5e4c::t_9ed81d7cd2cd44 267
+  s_990c9ce3ea5e4c::t_5a42f2ddc0b84f 346
+  s_990c9ce3ea5e4c::t_a4cae790cec547 178
+internal/engine/engine_test.go
+  s_990c9ce3ea5e4c::t_3439563531ac68 334-366
+  s_990c9ce3ea5e4c::t_ac45b3dc5ed8f0 367-384
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "81272314ae47b95880959d4a3c62b5ab120269e2",
+  "prompts": {},
+  "sessions": {
+    "s_990c9ce3ea5e4c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f19624904ffemti4uJ5PshTjas",
+        "model": "unknown"
+      },
+      "human_author": "VantIer <vantler@live.cn>"
+    }
+  }
+}
