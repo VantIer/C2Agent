@@ -3,6 +3,7 @@ package main
 // Local file actions, semantically aligned with remote/common and remote-c.
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -173,47 +174,83 @@ func readFile(path, startLine, endLine string) string {
 	if info.IsDir() {
 		return path + " is a directory"
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "Error reading file: " + err.Error()
-	}
-	content := string(data)
 	if startLine == "" || startLine == "0" {
-		if len(content) > readFileLimit {
-			cut := readFileLimit
-			// Do not split a multi-byte UTF-8 sequence at the truncation point.
-			for cut > 0 && !utf8.RuneStart(content[cut]) {
-				cut--
-			}
-			return content[:cut]
-		}
-		return content
+		return readWholeLimited(path)
 	}
 	s, err := strconv.Atoi(strings.TrimSpace(startLine))
 	if err != nil {
 		return fmt.Sprintf("Invalid line numbers: start_line=%s, end_line=%s", startLine, endLine)
 	}
-	lines := splitKeepEnds(content)
 	start := s - 1
 	if start < 0 {
 		start = 0
 	}
-	end := len(lines)
+	end := 0 // 0 = to end of file
 	if endLine != "" && endLine != "0" {
 		if e, err := strconv.Atoi(strings.TrimSpace(endLine)); err == nil {
 			end = e
 		}
 	}
-	if start >= len(lines) {
-		return fmt.Sprintf("Start line %s exceeds file line count (%d)", startLine, len(lines))
+
+	f, err := os.Open(path)
+	if err != nil {
+		return "Error reading file: " + err.Error()
 	}
-	if end > len(lines) {
-		end = len(lines)
+	defer f.Close()
+
+	// Stream line by line, keeping only the requested range, so a huge file is
+	// never loaded into memory in full.
+	r := bufio.NewReader(f)
+	var b strings.Builder
+	lineNo := 0
+	reachedStart := false
+	for {
+		line, rerr := r.ReadString('\n')
+		if len(line) > 0 {
+			lineNo++
+			if lineNo > start {
+				reachedStart = true
+				if end > 0 && lineNo > end {
+					break
+				}
+				b.WriteString(line)
+			}
+		}
+		if rerr != nil {
+			break
+		}
 	}
-	if end < start {
-		end = start
+	if !reachedStart {
+		return fmt.Sprintf("Start line %s exceeds file line count (%d)", startLine, lineNo)
 	}
-	return strings.Join(lines[start:end], "")
+	return b.String()
+}
+
+// readWholeLimited reads at most enough bytes to cover readFileLimit characters
+// (4 bytes per character in the worst case), so an enormous file cannot exhaust
+// memory, then truncates to readFileLimit characters (not bytes).
+func readWholeLimited(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return "Error reading file: " + err.Error()
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, int64(readFileLimit)*4+4))
+	if err != nil {
+		return "Error reading file: " + err.Error()
+	}
+	s := string(data)
+	if utf8.RuneCountInString(s) <= readFileLimit {
+		return s
+	}
+	n := 0
+	for i := range s {
+		if n == readFileLimit {
+			return s[:i]
+		}
+		n++
+	}
+	return s
 }
 
 func writeFile(path, content string) string {

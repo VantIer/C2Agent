@@ -290,6 +290,18 @@ static char *act_rename(char **p, int n) {
     return printf_str("Successfully renamed: %s -> %s", path, new_name);
 }
 
+/* utf8_char_prefix returns the byte length of the longest prefix of s that is
+ * at most max_chars UTF-8 code points and does not split a sequence. */
+static size_t utf8_char_prefix(const char *s, size_t len, size_t max_chars) {
+    size_t i = 0, chars = 0;
+    while (i < len && chars < max_chars) {
+        i++;
+        while (i < len && ((unsigned char)s[i] & 0xC0) == 0x80) i++;
+        chars++;
+    }
+    return i;
+}
+
 static char *act_read_file(char **p, int n) {
     if (n < 1) return xstrdup("Error: missing read_file path");
     const char *path = p[0];
@@ -298,16 +310,19 @@ static char *act_read_file(char **p, int n) {
     if (!path_exists(path)) return printf_str("File does not exist: %s", path);
     if (is_dir(path)) return printf_str("%s is a directory", path);
 
-    size_t blen = 0;
-    char *raw = slurp(path, &blen);
-    if (!raw) return printf_str("Error reading file: %s", strerror(errno));
-
-    /* whole-file mode */
     int whole = (sl == NULL || sl[0] == 0 || strcmp(sl, "0") == 0);
     if (whole) {
-        size_t take = blen < READ_FILE_LIMIT ? blen : READ_FILE_LIMIT;
-        /* Do not split a multi-byte UTF-8 sequence at the truncation point. */
-        while (take > 0 && take < blen && ((unsigned char)raw[take] & 0xC0) == 0x80) take--;
+        /* Read a bounded prefix (enough for READ_FILE_LIMIT UTF-8 chars) so an
+         * enormous file cannot exhaust memory, then truncate to the char limit
+         * (4 bytes per char worst case + slack). */
+        FILE *f = c2a_fopen(path, "rb");
+        if (!f) return printf_str("Error reading file: %s", strerror(errno));
+        size_t cap = (size_t)READ_FILE_LIMIT * 4 + 4;
+        char *raw = (char *)malloc(cap + 1);
+        if (!raw) { fclose(f); return xstrdup("Error reading file: out of memory"); }
+        size_t got = fread(raw, 1, cap, f);
+        fclose(f);
+        size_t take = utf8_char_prefix(raw, got, READ_FILE_LIMIT);
         char *res = (char *)malloc(take + 1);
         if (!res) { free(raw); return xstrdup("Error reading file: out of memory"); }
         memcpy(res, raw, take);
@@ -316,64 +331,67 @@ static char *act_read_file(char **p, int n) {
         return res;
     }
 
-    /* line mode: split into lines keeping trailing '\n' */
-    typedef struct { const char *s; size_t n; } line_t;
-    line_t *lines = (line_t *)malloc(sizeof(line_t) * 128);
-    int cap = 128, nlines = 0;
-    if (!lines) { free(raw); return xstrdup("Error reading file: out of memory"); }
-    size_t i = 0;
-    while (i < blen) {
-        size_t s = i;
-        while (i < blen && raw[i] != '\n') i++;
-        size_t e = (i < blen) ? i + 1 : i; /* include '\n' */
-        if (nlines == cap) {
-            cap *= 2;
-            line_t *nl = (line_t *)realloc(lines, (size_t)cap * sizeof(line_t));
-            if (!nl) { free(lines); free(raw); return xstrdup("Error reading file: out of memory"); }
-            lines = nl;
-        }
-        lines[nlines].s = raw + s;
-        lines[nlines].n = e - s;
-        nlines++;
-        i = e;
-    }
-
+    /* line mode: stream the file, keeping only the requested range. */
     int start = 1;
     if (sl && sl[0] && strcmp(sl, "0") != 0) {
         char *sp = NULL;
         long sv = strtol(sl, &sp, 10);
-        if (sp == sl || *sp != '\0' || sv < 1) {
-            free(lines);
-            free(raw);
-            return printf_str("Invalid start_line: %s", sl);
-        }
+        if (sp == sl || *sp != '\0' || sv < 1) return printf_str("Invalid start_line: %s", sl);
         start = (int)sv;
     }
-    int s = start - 1;
-    /* end defaults to end-of-file; an invalid end_line falls back to it too
-     * (matches the Go agent). */
-    int end = nlines;
+    int end = 0; /* 0 = to end-of-file; invalid end_line falls back to it too */
     if (el && el[0] && strcmp(el, "0") != 0) {
         char *endp = NULL;
         long v = strtol(el, &endp, 10);
         if (endp != el && *endp == '\0' && v > 0) end = (int)v;
     }
-    if (s >= nlines) {
-        char *err = printf_str("Start line %s exceeds file line count (%d)", sl, nlines);
-        free(lines);
-        free(raw);
-        return err;
-    }
-    if (end > nlines) end = nlines;
-    if (end < s) end = s;
 
-    strbuf_t out;
+    FILE *f = c2a_fopen(path, "rb");
+    if (!f) return printf_str("Error reading file: %s", strerror(errno));
+    strbuf_t out, cur;
     sb_init(&out);
-    for (int k = s; k < end; k++) sb_append(&out, lines[k].s, lines[k].n);
-    char *res = sb_take(&out);
-    free(lines);
-    free(raw);
-    return res;
+    sb_init(&cur);
+    char buf[65536];
+    int lineNo = 0;
+    int reachedStart = 0;
+    int done = 0;
+    for (;;) {
+        size_t r = fread(buf, 1, sizeof buf, f);
+        if (r == 0) break;
+        for (size_t k = 0; k < r; k++) {
+            char ch = buf[k];
+            if (ch == '\n') {
+                lineNo++;
+                if (lineNo >= start) {
+                    reachedStart = 1;
+                    if (end > 0 && lineNo > end) { done = 1; break; }
+                    if (cur.len) sb_append(&out, cur.data, cur.len);
+                    sb_append(&out, "\n", 1);
+                }
+                cur.len = 0;
+                if (cur.data) cur.data[0] = 0;
+            } else if (sb_append(&cur, &ch, 1) != 0) {
+                done = 1;
+                break;
+            }
+        }
+        if (done) break;
+    }
+    /* final line without a trailing newline */
+    if (!done && cur.len > 0) {
+        lineNo++;
+        if (lineNo >= start && (end == 0 || lineNo <= end)) {
+            reachedStart = 1;
+            sb_append(&out, cur.data, cur.len);
+        }
+    }
+    fclose(f);
+    sb_free(&cur);
+    if (!reachedStart) {
+        sb_free(&out);
+        return printf_str("Start line %s exceeds file line count (%d)", sl, lineNo);
+    }
+    return sb_take(&out);
 }
 
 static char *act_write_file(char **p, int n) {

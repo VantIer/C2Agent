@@ -18,7 +18,6 @@ const (
 	PhaseLLM      Phase = "llm"
 	PhaseExec     Phase = "exec"
 	PhaseAuthWait Phase = "auth_wait"
-	PhaseDone     Phase = "done"
 )
 
 // PendingCommand is an action awaiting user authorization.
@@ -311,24 +310,18 @@ func (e *Engine) runConversation(s *Session, message string) {
 			s.job = job
 			s.mu.Unlock()
 			var r agent.JobResult
-			select {
-			case r = <-job.Result:
-			default:
-				select {
-				case r = <-job.Result:
-				case <-ag.Done():
-					select {
-					case r = <-job.Result:
-					default:
-						r = agent.JobResult{Err: agent.ErrClosed}
-					}
-				}
-			}
+			r.Output, r.Err = waitJob(ag, job)
 			s.mu.Lock()
 			s.job = nil
 			s.mu.Unlock()
 
 			if r.Err != nil {
+				if r.Err == agent.ErrCancelled {
+					// The user stopped the session (or the job was cancelled):
+					// report it as a stop, not as an execution failure.
+					e.publishNow(s, Event{"type": "stopped"})
+					return
+				}
 				if r.Err == agent.ErrClosed {
 					msg := "Error: agent offline"
 					seq := e.appendTool(s, tc.ID, action, msg)

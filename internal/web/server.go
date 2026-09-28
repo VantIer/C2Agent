@@ -453,12 +453,18 @@ func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"path": path, "items": parseListing(out), "raw": out})
 }
 
-// listingError reports a business error returned by the agent's list_dir, so
-// the UI is not shown an empty directory instead of the failure.
+// listingErrorRE matches the native agents' wording ("Error: ...", "Path does
+// not exist", "... is a file") plus common shell/OS errors (bash, cmd.exe,
+// PowerShell, including the Chinese localizations), so a failed listing is not
+// silently rendered as an empty directory.
+var listingErrorRE = regexp.MustCompile(`(?i)(^error\b|^path does not exist| is a file\b|` +
+	`cannot find path|does not exist|no such file|cannot access|access is denied|` +
+	`is not a directory|not recognized|不是内部或外部命令|系统找不到指定的路径|拒绝访问)`)
+
+// listingError reports a business error returned by the agent's list_dir.
 func listingError(out string) (string, bool) {
 	t := strings.TrimSpace(out)
-	if strings.HasPrefix(t, "Error") || strings.HasPrefix(t, "Path does not exist") ||
-		strings.HasPrefix(t, "is a file") {
+	if listingErrorRE.MatchString(t) {
 		return t, true
 	}
 	return "", false

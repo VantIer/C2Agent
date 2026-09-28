@@ -58,6 +58,19 @@ func TestPortConflictWildcard(t *testing.T) {
 	}
 }
 
+// The web panel must not share a port with a listener on a conflicting host.
+func TestWebListenerPortConflict(t *testing.T) {
+	cfg := Default()
+	cfg.Native.Enabled = true
+	cfg.Native.AuthToken = "x"
+	cfg.Web.ListenHost = "127.0.0.1"
+	cfg.Native.ListenHost = "0.0.0.0"
+	cfg.Web.ListenPort = cfg.Native.ListenPort
+	if err := cfg.normalize(); err == nil {
+		t.Fatal("expected web/native port conflict")
+	}
+}
+
 // An existing but empty config file falls back to defaults instead of erroring.
 func TestEmptyConfigFileUsesDefaults(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "empty.json")

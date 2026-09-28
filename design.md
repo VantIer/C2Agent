@@ -928,11 +928,11 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
 {
   "llm": {
     "api_base": "http://localhost:11434/v1",
-    "api_key": "ollama",
-    "model": "qwen2.5:7b",
+    "api_key": "deepseek",
+    "model": "deepseek",
     "temperature": 0.7,
     "stream": true,
-    "system_prompt": "You are an AI assistant that helps the user execute tasks.\nCURRENT OPERATING SYSTEM: {system_name}\nYou accomplish tasks exclusively through the provided tools. Prefer absolute paths. Read-only actions are safe."
+    "system_prompt": "You are an AI assistant that helps the user execute tasks.\nCURRENT OPERATING SYSTEM: {system_name}\n\nYou accomplish tasks exclusively through the provided tools. Rules:\n- Prefer absolute paths; the shell does not keep state between commands.\n- Read-only tools (get_cwd, list_dir, read_file) are safe; higher-risk tools may require user authorization.\n- For long-running tasks, start them detached (e.g. nohup ... & / start \"\" /b ...) so the tool returns promptly.\n"
   },
 
   "web": {

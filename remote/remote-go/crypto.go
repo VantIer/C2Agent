@@ -10,9 +10,10 @@ import (
 	"net"
 )
 
+// Directional nonces, kept as immutable value arrays (callers slice them).
 var (
-	nonceC2ToAgent = []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	nonceAgentToC2 = []byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	nonceC2ToAgent = [12]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	nonceAgentToC2 = [12]byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 )
 
 func deriveKey(token string) [32]byte { return sha256.Sum256([]byte(token)) }

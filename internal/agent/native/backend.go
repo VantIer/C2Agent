@@ -40,7 +40,9 @@ type Backend struct {
 	dataMu     sync.Mutex
 	dataQueues map[uint64]*dataQueue
 
-	nextReq atomic.Uint64
+	nextReq   atomic.Uint64
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // NewBackend wraps an established (post-handshake) connection.
@@ -50,6 +52,7 @@ func NewBackend(conn net.Conn) *Backend {
 		writeMu:    &sync.Mutex{},
 		pending:    make(map[uint64]chan string),
 		dataQueues: make(map[uint64]*dataQueue),
+		done:       make(chan struct{}),
 	}
 }
 
@@ -118,6 +121,8 @@ func (b *Backend) forward(ctx context.Context, cmd uint8, params []string) (stri
 		return out, nil
 	case <-ctx.Done():
 		return "", ctx.Err()
+	case <-b.done:
+		return "", agent.NewNetworkError("connection closed")
 	}
 }
 
@@ -205,6 +210,8 @@ func (b *Backend) Upload(ctx context.Context, localPath, destPath string) (strin
 		return out, nil
 	case <-ctx.Done():
 		return "", ctx.Err()
+	case <-b.done:
+		return "", agent.NewNetworkError("connection closed")
 	}
 }
 
@@ -262,6 +269,9 @@ func (b *Backend) Download(ctx context.Context, srcPath, destDir string) (string
 		case <-ctx.Done():
 			cleanup()
 			return "", ctx.Err()
+		case <-b.done:
+			cleanup()
+			return "", agent.NewNetworkError("connection closed")
 		}
 	}
 }
@@ -278,5 +288,8 @@ func (b *Backend) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the underlying connection.
-func (b *Backend) Close() error { return b.conn.Close() }
+// Close wakes every pending request and closes the underlying connection.
+func (b *Backend) Close() error {
+	b.closeOnce.Do(func() { close(b.done) })
+	return b.conn.Close()
+}

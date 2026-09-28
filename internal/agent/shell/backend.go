@@ -21,6 +21,7 @@ type shellResult struct {
 type pendingReq struct {
 	lastCommand string
 	marker      string
+	raw         bool
 	lines       []string
 	ch          chan shellResult
 }
@@ -55,9 +56,21 @@ func (b *Backend) write(p []byte) error {
 // request sends one single-line command and waits for the marker-delimited
 // reply. Queue/exec timeout is provided by the caller's context.
 func (b *Backend) request(ctx context.Context, command string) (string, error) {
+	return b.requestMode(ctx, command, false)
+}
+
+// requestRaw is like request but preserves the reply verbatim: only the marker
+// framing and the echoed command line are removed. It is used for file reads,
+// whose content must not be mangled by the prompt/blank-line heuristics in
+// stripShellResponse.
+func (b *Backend) requestRaw(ctx context.Context, command string) (string, error) {
+	return b.requestMode(ctx, command, true)
+}
+
+func (b *Backend) requestMode(ctx context.Context, command string, raw bool) (string, error) {
 	command = oneLine(command)
 	marker := randMarker()
-	p := &pendingReq{marker: marker, lastCommand: command, ch: make(chan shellResult, 1)}
+	p := &pendingReq{marker: marker, lastCommand: command, raw: raw, ch: make(chan shellResult, 1)}
 
 	b.mu.Lock()
 	if b.pending != nil {
@@ -145,7 +158,12 @@ func (b *Backend) handleData(data string) {
 		if b.pending != nil && line == b.pending.marker {
 			p := b.pending
 			b.pending = nil
-			out := stripShellResponse(p.lines, p.marker, p.lastCommand)
+			var out string
+			if p.raw {
+				out = stripFileResponse(p.lines, p.marker, p.lastCommand)
+			} else {
+				out = stripShellResponse(p.lines, p.marker, p.lastCommand)
+			}
 			select {
 			case p.ch <- shellResult{out: out}:
 			default:
@@ -171,7 +189,12 @@ func (b *Backend) Execute(ctx context.Context, action string, params map[string]
 	if strings.TrimSpace(cmd) == "" {
 		return "Error: empty shell command", nil
 	}
-	out, err := b.request(ctx, cmd)
+	var out string
+	if action == "read_file" {
+		out, err = b.requestRaw(ctx, cmd)
+	} else {
+		out, err = b.request(ctx, cmd)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -254,7 +277,7 @@ func (b *Backend) editFile(ctx context.Context, params map[string]any) (string, 
 	if err != nil {
 		return "Error: " + err.Error(), nil
 	}
-	content, err := b.request(ctx, readCmd)
+	content, err := b.requestRaw(ctx, readCmd)
 	if err != nil {
 		return "", err
 	}

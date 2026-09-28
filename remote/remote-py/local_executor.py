@@ -96,24 +96,39 @@ def read_file(path: str, start_line: str = "0", end_line: str = "0") -> str:
             return f"File does not exist: {path}"
         if target.is_dir():
             return f"{path} is a directory"
-        with open(target, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+
         if start_line in ("", "0"):
-            return "".join(lines)[:51200]
+            # Whole-file read capped at 51200 characters: open in text mode and
+            # read only the limit, so a huge file is never loaded in full.
+            with open(target, "r", encoding="utf-8") as f:
+                return f.read(51200)
+
         try:
             start = max(0, int(start_line) - 1)
         except ValueError:
             return f"Invalid start_line: {start_line}"
-        end = len(lines)
+        end = None
         if end_line not in ("", "0"):
             try:
                 end = int(end_line)
             except ValueError:
-                end = len(lines)  # invalid end_line -> to end of file
-        end = min(len(lines), end)
-        if start >= len(lines):
-            return f"Start line {start_line} exceeds file line count ({len(lines)})"
-        return "".join(lines[start:end])
+                end = None  # invalid end_line -> to end of file
+
+        # Stream line by line, keeping only the requested range.
+        out = []
+        line_no = 0
+        reached_start = False
+        with open(target, "r", encoding="utf-8") as f:
+            for line in f:
+                line_no += 1
+                if line_no > start:
+                    reached_start = True
+                    if end is not None and line_no > end:
+                        break
+                    out.append(line)
+        if not reached_start:
+            return f"Start line {start_line} exceeds file line count ({line_no})"
+        return "".join(out)
     except Exception as e:
         return f"Error reading file: {str(e)}"
 

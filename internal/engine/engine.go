@@ -46,20 +46,7 @@ type Engine struct {
 // New creates an engine using the official OpenAI-compatible client.
 func New(cfg *config.Config, reg *agent.Registry) *Engine {
 	client := llm.New(cfg.LLM.APIBase, cfg.LLM.APIKey, cfg.LLM.Model, cfg.LLM.Temperature, cfg.LLM.Stream)
-	e := NewWithClient(cfg, reg, client)
-	reg.AddRemoveListener(e.onAgentRemoved)
-	return e
-}
-
-// onAgentRemoved closes any sessions bound to an agent that has disconnected,
-// so stale sessions (and their authorization/stop state) are not reused on a
-// later reconnect, and the per-agent session quota is released.
-func (e *Engine) onAgentRemoved(ag *agent.Agent) {
-	go func() {
-		for _, s := range e.ListSessions(ag.ID) {
-			e.CloseSession(s.ID)
-		}
-	}()
+	return NewWithClient(cfg, reg, client)
 }
 
 // NewWithClient creates an engine with an injected chat client (for tests).
@@ -408,8 +395,13 @@ func (e *Engine) wait(ag *agent.Agent, j *agent.Job) (string, error) {
 	if err := ag.Enqueue(j); err != nil {
 		return "", err
 	}
-	// Prefer a result that is already available; only treat the agent's close
-	// as an error when no result was (about to be) delivered.
+	return waitJob(ag, j)
+}
+
+// waitJob blocks for a job's result. It prefers a result that is already
+// available, and only treats the agent's close as an error when no result was
+// (about to be) delivered.
+func waitJob(ag *agent.Agent, j *agent.Job) (string, error) {
 	select {
 	case r := <-j.Result:
 		return r.Output, r.Err

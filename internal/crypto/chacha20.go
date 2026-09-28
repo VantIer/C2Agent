@@ -17,11 +17,24 @@ import (
 	"net"
 )
 
-// Directional nonces.
+// Directional nonces. They are kept in unexported value arrays and handed out
+// as fresh copies, so callers cannot mutate the shared constants.
 var (
-	NonceC2ToAgent = []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	NonceAgentToC2 = []byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	nonceC2ToAgent = [12]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	nonceAgentToC2 = [12]byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 )
+
+// NonceC2ToAgent returns a fresh copy of the C2 -> Agent directional nonce.
+func NonceC2ToAgent() []byte {
+	n := nonceC2ToAgent
+	return n[:]
+}
+
+// NonceAgentToC2 returns a fresh copy of the Agent -> C2 directional nonce.
+func NonceAgentToC2() []byte {
+	n := nonceAgentToC2
+	return n[:]
+}
 
 // DeriveKey returns SHA-256(authToken).
 func DeriveKey(authToken string) [32]byte {

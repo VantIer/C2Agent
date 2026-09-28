@@ -28,65 +28,101 @@ type Spec struct {
 	Params      []Param
 }
 
-// Specs lists every action in a stable order.
-var Specs = []Spec{
-	{"get_cwd", protocol.CmdGetCwd, true,
-		"Get the absolute current working directory on the target.",
-		nil},
-	{"list_dir", protocol.CmdListDir, true,
-		"List the contents of a directory on the target.",
-		[]Param{{"path", false, "Directory path (default '.')."}}},
-	{"read_file", protocol.CmdReadFile, true,
-		"Read a text file on the target, optionally a line range. Whole-file reads are truncated to 51200 characters.",
-		[]Param{
-			{"path", true, "File path."},
-			{"start_line", false, "1-based first line (0/empty = from start)."},
-			{"end_line", false, "1-based last line (0/empty = to end)."},
-		}},
-	{"write_file", protocol.CmdWriteFile, false,
-		"Create or overwrite a file with the given content.",
-		[]Param{{"path", true, "File path."}, {"content", true, "Full file content."}}},
-	{"create_file", protocol.CmdCreateFile, false,
-		"Create an empty file.",
-		[]Param{{"path", true, "File path."}}},
-	{"delete_file", protocol.CmdDeleteFile, false,
-		"Delete a file.",
-		[]Param{{"path", true, "File path."}}},
-	{"delete_dir", protocol.CmdDeleteDir, false,
-		"Delete a directory recursively.",
-		[]Param{{"path", true, "Directory path."}}},
-	{"make_dir", protocol.CmdMakeDir, false,
-		"Create a directory (parents included).",
-		[]Param{{"path", true, "Directory path."}}},
-	{"rename_file", protocol.CmdRenameFile, false,
-		"Rename a file.",
-		[]Param{{"path", true, "File path."}, {"new_name", true, "New file name (no directory)."}}},
-	{"rename_dir", protocol.CmdRenameDir, false,
-		"Rename a directory.",
-		[]Param{{"path", true, "Directory path."}, {"new_name", true, "New directory name."}}},
-	{"edit_file", protocol.CmdEditFile, false,
-		"Edit a text file by inserting, deleting or replacing lines.",
-		[]Param{
-			{"path", true, "File path."},
-			{"operation", true, "One of: add, del, modify."},
-			{"start_line", false, "1-based start line."},
-			{"end_line", false, "1-based end line (del/modify)."},
-			{"content", false, "Content for add/modify."},
-		}},
-	{"copy", protocol.CmdCopy, false,
-		"Copy a file or directory.",
-		[]Param{{"src", true, "Source path."}, {"dest", true, "Destination path."}}},
-	{"move", protocol.CmdMove, false,
-		"Move a file or directory.",
-		[]Param{{"src", true, "Source path."}, {"dest", true, "Destination path."}}},
-	{"exec_cmd", protocol.CmdExecCmd, false,
-		"Execute a shell command on the target and return its output.",
-		[]Param{{"command", true, "The shell command to run."}}},
+// actionMeta carries the control-end-only metadata for an action. The wire
+// code, name and ordered parameter list live in protocol.Actions, which is the
+// single source of truth, so they can never drift from the protocol.
+type actionMeta struct {
+	lowRisk     bool
+	description string
+	required    map[string]bool
+	paramDesc   map[string]string
 }
+
+func meta(lowRisk bool, description string, required []string, paramDesc map[string]string) actionMeta {
+	req := make(map[string]bool, len(required))
+	for _, r := range required {
+		req[r] = true
+	}
+	return actionMeta{lowRisk: lowRisk, description: description, required: req, paramDesc: paramDesc}
+}
+
+var actionMetas = map[string]actionMeta{
+	"get_cwd": meta(true,
+		"Get the absolute current working directory on the target.", nil, nil),
+	"list_dir": meta(true,
+		"List the contents of a directory on the target.", nil,
+		map[string]string{"path": "Directory path (default '.')."}),
+	"read_file": meta(true,
+		"Read a text file on the target, optionally a line range. Whole-file reads are truncated to 51200 characters.",
+		[]string{"path"},
+		map[string]string{
+			"path":       "File path.",
+			"start_line": "1-based first line (0/empty = from start).",
+			"end_line":   "1-based last line (0/empty = to end).",
+		}),
+	"write_file": meta(false,
+		"Create or overwrite a file with the given content.", []string{"path", "content"},
+		map[string]string{"path": "File path.", "content": "Full file content."}),
+	"create_file": meta(false,
+		"Create an empty file.", []string{"path"},
+		map[string]string{"path": "File path."}),
+	"delete_file": meta(false,
+		"Delete a file.", []string{"path"},
+		map[string]string{"path": "File path."}),
+	"delete_dir": meta(false,
+		"Delete a directory recursively.", []string{"path"},
+		map[string]string{"path": "Directory path."}),
+	"make_dir": meta(false,
+		"Create a directory (parents included).", []string{"path"},
+		map[string]string{"path": "Directory path."}),
+	"rename_file": meta(false,
+		"Rename a file.", []string{"path", "new_name"},
+		map[string]string{"path": "File path.", "new_name": "New file name (no directory)."}),
+	"rename_dir": meta(false,
+		"Rename a directory.", []string{"path", "new_name"},
+		map[string]string{"path": "Directory path.", "new_name": "New directory name."}),
+	"edit_file": meta(false,
+		"Edit a text file by inserting, deleting or replacing lines.", []string{"path", "operation"},
+		map[string]string{
+			"path":       "File path.",
+			"operation":  "One of: add, del, modify.",
+			"start_line": "1-based start line.",
+			"end_line":   "1-based end line (del/modify).",
+			"content":    "Content for add/modify.",
+		}),
+	"copy": meta(false,
+		"Copy a file or directory.", []string{"src", "dest"},
+		map[string]string{"src": "Source path.", "dest": "Destination path."}),
+	"move": meta(false,
+		"Move a file or directory.", []string{"src", "dest"},
+		map[string]string{"src": "Source path.", "dest": "Destination path."}),
+	"exec_cmd": meta(false,
+		"Execute a shell command on the target and return its output.", []string{"command"},
+		map[string]string{"command": "The shell command to run."}),
+}
+
+// Specs lists every action, derived from the wire protocol action table so the
+// code / name / ordered parameters are defined in exactly one place.
+var Specs []Spec
 
 var byName = map[string]Spec{}
 
 func init() {
+	Specs = make([]Spec, 0, len(protocol.Actions))
+	for _, a := range protocol.Actions {
+		m := actionMetas[a.Name]
+		params := make([]Param, len(a.Params))
+		for i, name := range a.Params {
+			params[i] = Param{Name: name, Required: m.required[name], Description: m.paramDesc[name]}
+		}
+		Specs = append(Specs, Spec{
+			Name:        a.Name,
+			Code:        a.Code,
+			LowRisk:     m.lowRisk,
+			Description: m.description,
+			Params:      params,
+		})
+	}
 	for _, s := range Specs {
 		byName[s.Name] = s
 	}

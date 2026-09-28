@@ -116,7 +116,12 @@ func (a *Agent) execJob(j *Job) {
 
 	out, err := a.dispatch(ctx, j)
 
-	if err != nil && errors.Is(err, context.DeadlineExceeded) && !j.Cancelled() {
+	if j.Cancelled() {
+		// A cancelled job reports uniformly as ErrCancelled, whether it was
+		// cancelled before starting or while in flight (its context is
+		// cancelled, so dispatch returns context.Canceled).
+		err = ErrCancelled
+	} else if err != nil && errors.Is(err, context.DeadlineExceeded) {
 		// Only reclassify a genuine context timeout; never mask a business
 		// error that merely coincided with the deadline.
 		err = &TimeoutError{After: a.cmdTimeout}

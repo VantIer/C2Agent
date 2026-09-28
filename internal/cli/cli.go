@@ -131,11 +131,14 @@ func (c *CLI) command(line string) bool {
 			fmt.Println("shutdown sent")
 		}
 	case "/exec":
-		if len(parts) < 2 {
+		// Take the command verbatim after "/exec " so quoting and repeated
+		// whitespace are preserved (strings.Fields would collapse them).
+		cmd := strings.TrimSpace(strings.TrimPrefix(line, "/exec"))
+		if cmd == "" {
 			fmt.Println("usage: /exec <command>")
 			break
 		}
-		out, err := c.eng.ExecDirect("", strings.Join(parts[1:], " "))
+		out, err := c.eng.ExecDirect("", cmd)
 		c.printResult(out, err)
 	default:
 		fmt.Println("unknown command:", parts[0], "(try /help)")

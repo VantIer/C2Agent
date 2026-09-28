@@ -331,6 +331,23 @@ func TestAgentOfflineEmitsAgentError(t *testing.T) {
 	}
 }
 
+// A disconnected agent must not take its sessions down: they are kept so a
+// reconnect with the same id can resume them (session resilience).
+func TestSessionsSurviveAgentDisconnect(t *testing.T) {
+	reg := newTestAgent(t, &fakeBackend{})
+	cfg := config.Default()
+	eng := NewWithClient(cfg, reg, &fakeLLM{})
+	s, err := eng.NewSession("a1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.UnregisterAgent(reg.Get("a1"))
+	time.Sleep(50 * time.Millisecond)
+	if eng.GetSession(s.ID) == nil {
+		t.Fatal("session was removed when its agent disconnected")
+	}
+}
+
 func TestMultiSessionSameAgent(t *testing.T) {
 	br := &fakeBackend{}
 	reg := newTestAgent(t, br)

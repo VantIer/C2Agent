@@ -66,8 +66,8 @@ func TestChaCha20EncryptRFC7539(t *testing.T) {
 // across partial-block boundaries.
 func TestChaCha20RoundTripAcrossBlocks(t *testing.T) {
 	key := DeriveKey("change-me-shared-token")
-	tx := NewChaCha20(key[:], NonceC2ToAgent, 0)
-	rx := NewChaCha20(key[:], NonceC2ToAgent, 0)
+	tx := NewChaCha20(key[:], NonceC2ToAgent(), 0)
+	rx := NewChaCha20(key[:], NonceC2ToAgent(), 0)
 
 	in := make([]byte, 5000)
 	for i := range in {
@@ -90,5 +90,15 @@ func TestChaCha20RoundTripAcrossBlocks(t *testing.T) {
 	}
 	if !bytes.Equal(in, out) {
 		t.Fatal("round-trip mismatch across block boundary")
+	}
+}
+
+// The exported nonce accessors must hand out copies so callers cannot corrupt
+// the shared constants.
+func TestNonceAccessorReturnsCopy(t *testing.T) {
+	n := NonceC2ToAgent()
+	n[0] = 0x7f
+	if NonceC2ToAgent()[0] != 0 {
+		t.Fatal("mutating the returned nonce leaked into the shared constant")
 	}
 }

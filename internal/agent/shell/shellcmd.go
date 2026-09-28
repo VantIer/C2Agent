@@ -62,6 +62,24 @@ func listDirCmd(osName, path string) (string, error) {
 	return "ls -la " + posixQuote(path), nil
 }
 
+// readWholeFileCmd builds a command that reads at most readFileByteCap bytes
+// from the head of path (rather than streaming an unbounded file); the control
+// end then truncates the result to 51200 characters. It is used only by
+// read_file — edit_file must read the whole file to rewrite it.
+func readWholeFileCmd(osName, path string) (string, error) {
+	if isWindows(osName) {
+		p, err := psQuote(path)
+		if err != nil {
+			return "", err
+		}
+		return "powershell -NoProfile -Command \"$fs=[IO.File]::OpenRead('" + p +
+			"');try{$n=[int][Math]::Min(" + strconv.Itoa(readFileByteCap) + ",$fs.Length);" +
+			"$b=New-Object byte[] $n;$r=$fs.Read($b,0,$n);" +
+			"[Convert]::ToBase64String($b,0,$r)}finally{$fs.Close()}\"", nil
+	}
+	return "head -c " + strconv.Itoa(readFileByteCap) + " " + posixQuote(path), nil
+}
+
 func readFileCmd(osName, path, startLine, endLine string) (string, error) {
 	if isWindows(osName) {
 		p, err := psQuote(path)
@@ -183,11 +201,14 @@ func createFileCmd(osName, path string) (string, error) {
 
 const (
 	posixChunk = 100000
-	winChunk   = 8000
 	// Guards against emitting a single shell command that exceeds the host
 	// shell's command-line / input length limits (base64 payload bytes).
 	posixCmdLimit = 900000
 	winCmdLimit   = 7000 // cmd.exe's command line is ~8 KB
+	// readFileByteCap bounds how many bytes a whole-file read pulls from the
+	// head of a file (enough for 51200 UTF-8 characters), so an enormous file
+	// cannot exhaust the controlled end's memory.
+	readFileByteCap = 51200 * 4
 )
 
 func chunks(s string, size int) []string {
@@ -205,6 +226,10 @@ func chunks(s string, size int) []string {
 // writeBase64Cmd builds a single command that base64-decodes b64 into destPath.
 func writeBase64Cmd(osName, destPath, b64 string) (string, error) {
 	if isWindows(osName) {
+		// A single well-formed command keeps the payload within cmd.exe's ~8 KB
+		// command-line limit; larger files are rejected (use a native agent).
+		// There is deliberately no multi-chunk path: it could never be reached
+		// within winCmdLimit and would also overflow the command line anyway.
 		if len(b64) > winCmdLimit {
 			return "", fmt.Errorf("file too large for a shell bot (%d base64 bytes > %d); use a native agent", len(b64), winCmdLimit)
 		}
@@ -212,18 +237,8 @@ func writeBase64Cmd(osName, destPath, b64 string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		cs := chunks(b64, winChunk)
-		if len(cs) == 0 {
-			return "powershell -NoProfile -Command \"[IO.File]::WriteAllBytes('" + dest + "',[byte[]]@())\"", nil
-		}
-		var stmts []string
-		stmts = append(stmts, "[IO.File]::WriteAllBytes('"+dest+"',[Convert]::FromBase64String('"+cs[0]+"'))")
-		for _, c := range cs[1:] {
-			// Add-Content -Encoding Byte works on Windows PowerShell 5.1
-			// (unlike [IO.File]::AppendAllBytes, which needs .NET Core 2.0+).
-			stmts = append(stmts, "Add-Content -Path '"+dest+"' -Value ([Convert]::FromBase64String('"+c+"')) -Encoding Byte")
-		}
-		return "powershell -NoProfile -Command \"" + strings.Join(stmts, ";") + "\"", nil
+		return "powershell -NoProfile -Command \"[IO.File]::WriteAllBytes('" + dest +
+			"',[Convert]::FromBase64String('" + b64 + "'))\"", nil
 	}
 	if len(b64) > posixCmdLimit {
 		return "", fmt.Errorf("file too large for a shell bot (%d base64 bytes > %d); use a native agent", len(b64), posixCmdLimit)
@@ -369,6 +384,9 @@ func actionToShell(action string, params map[string]any, osName string) (string,
 		}
 		return listDirCmd(osName, p)
 	case "read_file":
+		if v := strings.TrimSpace(s("start_line")); v == "" || v == "0" {
+			return readWholeFileCmd(osName, s("path"))
+		}
 		return readFileCmd(osName, s("path"), s("start_line"), s("end_line"))
 	case "write_file":
 		b64 := base64.StdEncoding.EncodeToString([]byte(s("content")))
@@ -394,16 +412,20 @@ func actionToShell(action string, params map[string]any, osName string) (string,
 // delegates to command.String so the control end has a single implementation.
 func paramString(v any) string { return command.String(v) }
 
-// truncateRunes caps s at max runes without splitting a UTF-8 sequence.
+// truncateRunes caps s at max characters (Unicode code points), never
+// splitting a UTF-8 sequence, matching the Python agent's character semantics.
 func truncateRunes(s string, max int) string {
-	if len(s) <= max {
+	if utf8.RuneCountInString(s) <= max {
 		return s
 	}
-	cut := max
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
+	n := 0
+	for i := range s {
+		if n == max {
+			return s[:i]
+		}
+		n++
 	}
-	return s[:cut]
+	return s
 }
 
 // oneLine collapses a command to a single line because the marker-based shell
@@ -454,6 +476,25 @@ func stripShellResponse(lines []string, marker, lastCommand string) string {
 	}
 	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
 		out = out[:len(out)-1]
+	}
+	return strings.Join(out, "\n")
+}
+
+// stripFileResponse removes only the framing from a file-read reply: lines
+// carrying the marker echo and the echoed command line. Unlike
+// stripShellResponse it never drops blank lines or lines that merely resemble
+// a shell prompt, so file content is preserved verbatim.
+func stripFileResponse(lines []string, marker, lastCommand string) string {
+	markerEcho := "echo " + marker
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if strings.Contains(l, markerEcho) || markerLineRe.MatchString(strings.TrimSpace(l)) {
+			continue
+		}
+		out = append(out, l)
+	}
+	if len(out) > 0 && lastCommand != "" && strings.Contains(out[0], lastCommand) {
+		out = out[1:]
 	}
 	return strings.Join(out, "\n")
 }

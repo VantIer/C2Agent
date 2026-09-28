@@ -205,6 +205,14 @@ func (c *Config) normalize() error {
 	if c.Web.ListenPort < 1 || c.Web.ListenPort > 65535 {
 		return fmt.Errorf("web.listen_port out of range: %d", c.Web.ListenPort)
 	}
+	if c.Native.Enabled && c.Web.ListenPort == c.Native.ListenPort &&
+		hostsConflict(c.Web.ListenHost, c.Native.ListenHost) {
+		return fmt.Errorf("web and native listeners share %s:%d", c.Web.ListenHost, c.Web.ListenPort)
+	}
+	if c.Shell.Enabled && c.Web.ListenPort == c.Shell.ListenPort &&
+		hostsConflict(c.Web.ListenHost, c.Shell.ListenHost) {
+		return fmt.Errorf("web and shell listeners share %s:%d", c.Web.ListenHost, c.Web.ListenPort)
+	}
 	return nil
 }
 

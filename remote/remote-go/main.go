@@ -224,8 +224,8 @@ func handshake(conn net.Conn, o *options) (*encryptedConn, *packetReader, error)
 	}
 
 	key := deriveKey(o.authToken)
-	tx := newChaCha20(key[:], nonceAgentToC2, 0)
-	rx := newChaCha20(key[:], nonceC2ToAgent, 0)
+	tx := newChaCha20(key[:], nonceAgentToC2[:], 0)
+	rx := newChaCha20(key[:], nonceC2ToAgent[:], 0)
 	enc := newEncryptedConn(conn, tx, rx)
 
 	host, err := os.Hostname()
