@@ -1,0 +1,98 @@
+remote/remote-go/main.go
+  s_1779d20044fcf2::t_9fd87c121898cc 465-469,471-472
+  s_1779d20044fcf2::t_7f31d7211a8234 23
+  s_1779d20044fcf2::t_2b47363c4c7217 135-137,139,164-168,170,182-202
+  s_1779d20044fcf2::t_a6f105ae658008 203-204
+remote/remote-go/exec_other.go
+  s_1779d20044fcf2::t_2ac0e1e9911c31 8,13-29
+remote/remote-c/agent.h
+  s_1779d20044fcf2::t_2b9c0e22c11daf 38,43
+  s_1779d20044fcf2::t_a40b1bf24a0f34 93-113
+  s_1779d20044fcf2::t_55afbaedc26aad 20
+remote/remote-c/main.c
+  s_1779d20044fcf2::t_659d990bec9c87 633,651-663,665-672
+  s_1779d20044fcf2::t_923cd3e0c9750b 608-609
+  s_1779d20044fcf2::t_4f0fd774a11ce9 354-394
+  s_1779d20044fcf2::t_7bf0adcf3149e5 725-726
+remote/remote-go/exec.go
+  s_1779d20044fcf2::t_efe11464ab96ec 20-25
+README.md
+  s_1779d20044fcf2::t_200a83c06f9007 143-144
+  s_1779d20044fcf2::t_708eafeef8e29b 433-434
+  s_1779d20044fcf2::t_92fcf961133767 572-578
+  s_1779d20044fcf2::t_6502c66f01cac0 278-284
+internal/agent/native/backend.go
+  s_1779d20044fcf2::t_501269f43e1e93 99-104
+  s_1779d20044fcf2::t_36bb392cf18912 48-52,65,70-88
+  s_1779d20044fcf2::t_0d09a6e6cc02fe 267-269,345
+  s_1779d20044fcf2::t_a2fae836cf5baa 321
+  s_1779d20044fcf2::t_32365fdf763bf9 330-332,341-344
+  s_1779d20044fcf2::t_78dce40f5dc6a4 138-140
+  s_1779d20044fcf2::t_a12baba02673d3 163-165
+  s_1779d20044fcf2::t_674ea3f0d0270a 258
+  s_1779d20044fcf2::t_72d3dc59ce39f7 190-192
+  s_1779d20044fcf2::t_1a53e98bec5e5f 15,22-24
+  s_1779d20044fcf2::t_2f16dab58f34be 25
+  s_1779d20044fcf2::t_77ad8da12c33a9 89
+internal/agent/shell/backend_test.go
+  s_1779d20044fcf2::t_f84515b8961d8e 1-68
+remote/config_remote.example.json
+  s_1779d20044fcf2::t_92831a8e167eba 8
+remote/remote-c/COMPILE.txt
+  s_1779d20044fcf2::t_20b069a8587e68 21,25-27,30
+internal/agent/shell/backend.go
+  s_1779d20044fcf2::t_be1c0ed9e24a0e 6,13,18-27,39-42
+  s_1779d20044fcf2::t_abbc66e4037073 112-124,130-147
+  s_1779d20044fcf2::t_45f7d6ec3c8c05 320-323,325-333
+  s_1779d20044fcf2::t_f3af4760f8bc30 204-210,231
+  s_1779d20044fcf2::t_8591aefb8a29f8 94-96
+  s_1779d20044fcf2::t_6589f5c735c744 148
+remote/remote-py/main.py
+  s_1779d20044fcf2::t_c67688567e4b45 128
+  s_1779d20044fcf2::t_c74e9af79eb260 99,101
+remote/remote-c/protocol.c
+  s_1779d20044fcf2::t_de38cdeced639b 436-437,440-441,443,445-459
+  s_1779d20044fcf2::t_1398ca32a9b9a6 282-289
+  s_1779d20044fcf2::t_23e4b62a69201f 438
+  s_1779d20044fcf2::t_757a14ed5ec412 260
+  s_1779d20044fcf2::t_d333bf89aaff50 439,442,444
+  s_1779d20044fcf2::t_dc8807127b245c 10-49
+internal/agent/queue.go
+  s_1779d20044fcf2::t_b05d8890aadc2e 128-138,144-162
+  s_1779d20044fcf2::t_2bab122c2d2073 163-164
+internal/agent/queue_test.go
+  s_1779d20044fcf2::t_b63013a9dac4db 121-172
+internal/agent/native/backend_test.go
+  s_1779d20044fcf2::t_5eddbc93735b71 1-51
+remote/remote-go/exec_windows.go
+  s_1779d20044fcf2::t_ee586fd089ff70 33-44
+  s_1779d20044fcf2::t_f3eb84145921f9 17
+internal/agent/agent.go
+  s_1779d20044fcf2::t_68643799290624 75-76,80
+  s_1779d20044fcf2::t_ae6dc9fcdd0a1f 41-48
+remote/remote-c/exec_cmd.c
+  s_1779d20044fcf2::t_3f056690eb6bbd 89
+  s_1779d20044fcf2::t_b4374a067337a3 200
+  s_1779d20044fcf2::t_f6189b4249054c 66-68,70,76
+  s_1779d20044fcf2::t_c2b89a40aafde7 123
+  s_1779d20044fcf2::t_0f794b1db6d6e5 64-65,69,71-75,77-78,90
+  s_1779d20044fcf2::t_9cc3809b29f5d4 195
+  s_1779d20044fcf2::t_89ca42abb016a4 182
+  s_1779d20044fcf2::t_5fe7864c684b62 160-162,170
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "09bf002f6530a85c86f9329095b6f1a7d70f5c36",
+  "prompts": {},
+  "sessions": {
+    "s_1779d20044fcf2": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f1386fadbffeA38FuJ0uWXlUOX",
+        "model": "unknown"
+      },
+      "human_author": "VantIer <vantler@live.cn>"
+    }
+  }
+}
