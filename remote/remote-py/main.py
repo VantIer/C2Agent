@@ -67,8 +67,6 @@ def _build_argparser() -> argparse.ArgumentParser:
                    help="Initial reconnect delay seconds (default 1)")
     p.add_argument("--reconnect-max", type=float, default=None,
                    help="Max reconnect delay seconds (default 60)")
-    p.add_argument("--log-level", default=None,
-                   help="Log level (DEBUG/INFO/WARNING/ERROR)")
     return p
 
 
@@ -98,9 +96,9 @@ def _merge_config(args: argparse.Namespace) -> dict:
     return cfg
 
 
-def _setup_logging(level: str) -> None:
+def _setup_logging() -> None:
     logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
+        level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
@@ -127,8 +125,7 @@ async def _run(cfg: dict) -> None:
 def main() -> None:
     args = _build_argparser().parse_args()
     cfg = _merge_config(args)
-    log_level = cfg.get("log_level") or args.log_level or "INFO"
-    _setup_logging(log_level)
+    _setup_logging()
     logger = logging.getLogger("remote")
     logger.info(f"agent '{cfg['agent_id']}' starting; C2={cfg['c2_address']}")
     try:

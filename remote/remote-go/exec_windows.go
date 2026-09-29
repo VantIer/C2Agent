@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"os/exec"
+	"strconv"
 	"syscall"
 	"unsafe"
 )
@@ -27,6 +28,18 @@ func shellCmd(ctx context.Context, command string) *exec.Cmd {
 	c := exec.CommandContext(ctx, "cmd.exe")
 	c.SysProcAttr = &syscall.SysProcAttr{CmdLine: "cmd.exe /c " + command}
 	return c
+}
+
+// killTree terminates the command's whole process tree. CommandContext alone
+// only kills cmd.exe, leaving its children running and their inherited stdout
+// pipe open (which would make CombinedOutput block).
+func killTree(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return nil
+	}
+	pid := cmd.Process.Pid
+	_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid)).Run()
+	return cmd.Process.Kill()
 }
 
 const cpUTF8 = 65001

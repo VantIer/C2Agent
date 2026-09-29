@@ -17,6 +17,12 @@ func runCmd(command string, timeout time.Duration) string {
 	defer cancel()
 
 	cmd := shellCmd(ctx, command)
+	// Bound how long Wait blocks on inherited output pipes after the process is
+	// killed, so an orphaned grandchild holding stdout cannot wedge the agent.
+	cmd.WaitDelay = 5 * time.Second
+	// Kill the whole process tree on timeout/cancel (CommandContext alone only
+	// kills the direct child).
+	cmd.Cancel = func() error { return killTree(cmd) }
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Sprintf("Error: Command timed out after %d seconds", int(timeout.Seconds()))

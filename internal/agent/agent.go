@@ -38,6 +38,14 @@ type Backend interface {
 	Close() error
 }
 
+// BusyReporter is implemented by backends that may still be occupied after an
+// execution timeout (a command that is still running on the controlled end).
+// Busy reports whether such a timed-out request is still outstanding; while it
+// is, the agent must not dispatch further commands.
+type BusyReporter interface {
+	Busy() bool
+}
+
 // NetworkError marks a transport failure (timeout / disconnect / protocol).
 type NetworkError struct{ Reason string }
 
@@ -64,9 +72,12 @@ type TimeoutError struct{ After time.Duration }
 func (e *TimeoutError) Error() string { return fmt.Sprintf("execution timed out after %s", e.After) }
 
 // ErrClosed / ErrCancelled are job outcomes when the agent goes away.
+// ErrAgentBusy marks a job rejected because the controlled end is still busy
+// with an earlier timed-out command.
 var (
 	ErrClosed    = errors.New("agent closed")
 	ErrCancelled = errors.New("job cancelled")
+	ErrAgentBusy = errors.New("agent still executing the timed-out command")
 )
 
 // Options configures a new Agent.

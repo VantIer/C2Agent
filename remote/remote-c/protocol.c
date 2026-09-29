@@ -7,6 +7,46 @@ static int g_encrypted = 0;
 static void crypto_encrypt_buf(const uint8_t *in, uint8_t *out, size_t n);
 static void crypto_decrypt_buf(uint8_t *buf, size_t n);
 
+/* Serializes all socket writes: the ChaCha20 tx state is global, so the
+ * heartbeat thread and the serve thread must not write concurrently. */
+static c2a_mutex_t g_write_mu;
+
+void c2a_mutex_init(c2a_mutex_t *m) {
+#ifdef _WIN32
+    InitializeCriticalSection(m);
+#else
+    pthread_mutex_init(m, NULL);
+#endif
+}
+
+void c2a_mutex_lock(c2a_mutex_t *m) {
+#ifdef _WIN32
+    EnterCriticalSection(m);
+#else
+    pthread_mutex_lock(m);
+#endif
+}
+
+void c2a_mutex_unlock(c2a_mutex_t *m) {
+#ifdef _WIN32
+    LeaveCriticalSection(m);
+#else
+    pthread_mutex_unlock(m);
+#endif
+}
+
+void c2a_mutex_destroy(c2a_mutex_t *m) {
+#ifdef _WIN32
+    DeleteCriticalSection(m);
+#else
+    pthread_mutex_destroy(m);
+#endif
+}
+
+void proto_global_init(void) {
+    c2a_mutex_init(&g_write_mu);
+}
+
 /* ===================================================================== */
 /* small helpers                                                         */
 /* ===================================================================== */
@@ -217,7 +257,7 @@ uint8_t *build_data_packet(uint64_t req_id, uint8_t end_flag,
 /* wire io                                                               */
 /* ===================================================================== */
 
-int send_all(sockfd_t sock, const uint8_t *buf, size_t n) {
+static int send_all_locked(sockfd_t sock, const uint8_t *buf, size_t n) {
     size_t off = 0;
     if (g_encrypted) {
         uint8_t *enc = (uint8_t *)malloc(n ? n : 1);
@@ -237,6 +277,14 @@ int send_all(sockfd_t sock, const uint8_t *buf, size_t n) {
         off += (size_t)w;
     }
     return 0;
+}
+
+/* Thread-safe send: serializes encryption + write across threads. */
+int send_all(sockfd_t sock, const uint8_t *buf, size_t n) {
+    c2a_mutex_lock(&g_write_mu);
+    int rc = send_all_locked(sock, buf, n);
+    c2a_mutex_unlock(&g_write_mu);
+    return rc;
 }
 
 int wait_sock(sockfd_t sock, int timeout_ms) {
@@ -382,6 +430,30 @@ void sleep_sec(double s) {
     ts.tv_sec = (time_t)s;
     ts.tv_nsec = (long)((s - (double)ts.tv_sec) * 1e9);
     nanosleep(&ts, NULL);
+#endif
+}
+
+void set_keepalive(sockfd_t sock) {
+#ifdef _WIN32
+    struct tcp_keepalive ka;
+    BOOL on = TRUE;
+    DWORD bytes = 0;
+    ka.onoff = 1;
+    ka.keepalivetime = 30000;     /* ms */
+    ka.keepaliveinterval = 10000; /* ms */
+    (void)setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (const char *)&on, sizeof on);
+    WSAIoctl(sock, SIO_KEEPALIVE_VALS, &ka, sizeof ka, NULL, 0, &bytes, NULL, NULL);
+#else
+    int on = 1;
+    (void)setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof on);
+#ifdef TCP_KEEPIDLE
+    {
+        int idle = 30, intvl = 10, cnt = 3;
+        (void)setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
+        (void)setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof intvl);
+        (void)setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof cnt);
+    }
+#endif
 #endif
 }
 

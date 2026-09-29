@@ -118,3 +118,55 @@ func TestEnqueueAfterClose(t *testing.T) {
 		t.Fatalf("expected ErrClosed, got %v", err)
 	}
 }
+
+// busyBackend reports Busy after a timed-out execution, like the shell/native
+// backends do when the controlled end is still running a command.
+type busyBackend struct {
+	fakeBackend
+	busy int32
+}
+
+func (b *busyBackend) Execute(ctx context.Context, action string, params map[string]any) (string, error) {
+	atomic.AddInt32(&b.calls, 1)
+	select {
+	case <-time.After(b.delay):
+		return "ok:" + action, nil
+	case <-ctx.Done():
+		atomic.StoreInt32(&b.busy, 1)
+		return "", ctx.Err()
+	}
+}
+
+func (b *busyBackend) Busy() bool { return atomic.LoadInt32(&b.busy) == 1 }
+
+// With timeout_action=fail, a timed-out command that is still running must
+// drain the queued jobs (ErrAgentBusy) instead of letting them time out too.
+func TestFailTimeoutDrainsQueueWhenBusy(t *testing.T) {
+	bb := &busyBackend{fakeBackend: fakeBackend{delay: 200 * time.Millisecond}}
+	a := New(Options{
+		ID: "b1", Kind: KindShell, Backend: bb,
+		CmdTimeout: 40 * time.Millisecond, TimeoutAction: "fail", QueueCapacity: 16,
+	})
+	defer a.Close()
+
+	j1 := NewJob(JobAction)
+	j1.Action = "exec_cmd"
+	if err := a.Enqueue(j1); err != nil {
+		t.Fatal(err)
+	}
+	j2 := NewJob(JobAction)
+	j2.Action = "list_dir"
+	if err := a.Enqueue(j2); err != nil {
+		t.Fatal(err)
+	}
+
+	r1 := <-j1.Result
+	var te *TimeoutError
+	if !errors.As(r1.Err, &te) {
+		t.Fatalf("j1: expected TimeoutError, got %v", r1.Err)
+	}
+	r2 := <-j2.Result
+	if !errors.Is(r2.Err, ErrAgentBusy) {
+		t.Fatalf("j2: expected ErrAgentBusy, got %v", r2.Err)
+	}
+}

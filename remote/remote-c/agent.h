@@ -17,6 +17,7 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #include <direct.h>
 #include <wchar.h>
 #include <shellapi.h>
@@ -34,10 +35,12 @@ typedef SOCKET sockfd_t;
 #include <sys/wait.h>
 #include <sys/time.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <dirent.h>
 #include <signal.h>
+#include <pthread.h>
 #define sock_close(s) close(s)
 #define SOCK_ERR (-1)
 typedef int sockfd_t;
@@ -86,6 +89,27 @@ typedef int sockfd_t;
 #else
 #define C2A_ULL "llu"
 #endif
+
+/* ---------- cross-platform write mutex ----------
+   The connection's ChaCha20 state is process-global, so concurrent writes
+   (heartbeat thread + serve thread) MUST be serialized or the encrypted
+   stream is corrupted. */
+#ifdef _WIN32
+typedef CRITICAL_SECTION c2a_mutex_t;
+#else
+typedef pthread_mutex_t c2a_mutex_t;
+#endif
+
+void c2a_mutex_init(c2a_mutex_t *m);
+void c2a_mutex_lock(c2a_mutex_t *m);
+void c2a_mutex_unlock(c2a_mutex_t *m);
+void c2a_mutex_destroy(c2a_mutex_t *m);
+
+/* Initialize process-wide protocol locks; call once at startup. */
+void proto_global_init(void);
+
+/* Enable TCP keepalive on a connected socket (detects half-open peers). */
+void set_keepalive(sockfd_t sock);
 
 /* ---------- incoming stream buffer ----------
    Valid bytes are data[off .. off+len). `off` is the consumed prefix;

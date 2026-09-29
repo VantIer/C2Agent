@@ -18,13 +18,16 @@ Files:
  Compiling on Linux (or macOS)
 --------------------------------------------------------------------------------
 
-    gcc -O2 -Wall -Wextra -o c2agent_remote protocol.c actions.c exec_cmd.c main.c
+    gcc -O2 -Wall -Wextra -o c2agent_remote protocol.c actions.c exec_cmd.c main.c -lpthread
 
 Resulting binary: ./c2agent_remote
 
+(-lpthread links the heartbeat thread; the write mutex/heartbeat keep the
+agent responsive to C2 heartbeats while a long command runs.)
+
 On very old glibc systems clock_gettime may need "-lrt":
 
-    gcc -O2 -Wall -Wextra -o c2agent_remote protocol.c actions.c exec_cmd.c main.c -lrt
+    gcc -O2 -Wall -Wextra -o c2agent_remote protocol.c actions.c exec_cmd.c main.c -lpthread -lrt
 
 --------------------------------------------------------------------------------
  Compiling on Windows (MinGW-w64 gcc)

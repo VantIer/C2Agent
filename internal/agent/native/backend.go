@@ -12,11 +12,16 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"c2agent/internal/agent"
 	"c2agent/internal/command"
 	"c2agent/internal/protocol"
 )
+
+// shutdownGrace bounds how long Shutdown waits for the agent to exit and close
+// the connection before the C2 forces it shut.
+const shutdownGrace = 1 * time.Second
 
 type dataChunk struct {
 	flag uint8
@@ -40,6 +45,11 @@ type Backend struct {
 	dataMu     sync.Mutex
 	dataQueues map[uint64]*dataQueue
 
+	// late tracks requests that timed out but have not been answered yet, so
+	// the agent is known to still be busy with them (see Busy).
+	lateMu sync.Mutex
+	late   map[uint64]struct{}
+
 	nextReq   atomic.Uint64
 	done      chan struct{}
 	closeOnce sync.Once
@@ -52,8 +62,29 @@ func NewBackend(conn net.Conn) *Backend {
 		writeMu:    &sync.Mutex{},
 		pending:    make(map[uint64]chan string),
 		dataQueues: make(map[uint64]*dataQueue),
+		late:       make(map[uint64]struct{}),
 		done:       make(chan struct{}),
 	}
+}
+
+func (b *Backend) markLate(reqID uint64) {
+	b.lateMu.Lock()
+	b.late[reqID] = struct{}{}
+	b.lateMu.Unlock()
+}
+
+func (b *Backend) clearLate(reqID uint64) {
+	b.lateMu.Lock()
+	delete(b.late, reqID)
+	b.lateMu.Unlock()
+}
+
+// Busy reports whether a timed-out request is still outstanding (its response
+// or file-transfer end has not arrived). Implements agent.BusyReporter.
+func (b *Backend) Busy() bool {
+	b.lateMu.Lock()
+	defer b.lateMu.Unlock()
+	return len(b.late) > 0
 }
 
 func (b *Backend) write(pkt []byte) error {
@@ -65,6 +96,12 @@ func (b *Backend) write(pkt []byte) error {
 
 // deliver routes an inbound packet to the matching waiter (or download queue).
 func (b *Backend) deliver(pkt *protocol.Packet) {
+	// Any packet other than a "continue" data packet completes the request it
+	// belongs to, so it is no longer late/busy.
+	if pkt.Cmd != protocol.EndFlagContinue {
+		b.clearLate(pkt.ReqID)
+	}
+
 	b.dataMu.Lock()
 	dq := b.dataQueues[pkt.ReqID]
 	b.dataMu.Unlock()
@@ -98,6 +135,9 @@ func (b *Backend) forward(ctx context.Context, cmd uint8, params []string) (stri
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	if b.Busy() {
+		return "", agent.ErrAgentBusy
+	}
 	reqID := b.nextReq.Add(1)
 	ch := make(chan string, 1)
 	b.pendingMu.Lock()
@@ -120,6 +160,9 @@ func (b *Backend) forward(ctx context.Context, cmd uint8, params []string) (stri
 	case out := <-ch:
 		return out, nil
 	case <-ctx.Done():
+		// The agent may still be running the command; remember the request so
+		// the backend reports Busy until its late response arrives.
+		b.markLate(reqID)
 		return "", ctx.Err()
 	case <-b.done:
 		return "", agent.NewNetworkError("connection closed")
@@ -143,6 +186,9 @@ func (b *Backend) Execute(ctx context.Context, action string, params map[string]
 func (b *Backend) Upload(ctx context.Context, localPath, destPath string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
+	}
+	if b.Busy() {
+		return "", agent.ErrAgentBusy
 	}
 	info, err := os.Stat(localPath)
 	if err != nil || info.IsDir() {
@@ -209,6 +255,7 @@ func (b *Backend) Upload(ctx context.Context, localPath, destPath string) (strin
 	case out := <-ch:
 		return out, nil
 	case <-ctx.Done():
+		b.markLate(reqID)
 		return "", ctx.Err()
 	case <-b.done:
 		return "", agent.NewNetworkError("connection closed")
@@ -217,6 +264,9 @@ func (b *Backend) Upload(ctx context.Context, localPath, destPath string) (strin
 
 // Download fetches srcPath into <destDir>/<basename(srcPath)>, overwriting.
 func (b *Backend) Download(ctx context.Context, srcPath, destDir string) (string, error) {
+	if b.Busy() {
+		return "", agent.ErrAgentBusy
+	}
 	reqID := b.nextReq.Add(1)
 	dq := &dataQueue{ch: make(chan dataChunk, 4096), done: make(chan struct{})}
 	b.dataMu.Lock()
@@ -268,6 +318,7 @@ func (b *Backend) Download(ctx context.Context, srcPath, destDir string) (string
 			}
 		case <-ctx.Done():
 			cleanup()
+			b.markLate(reqID)
 			return "", ctx.Err()
 		case <-b.done:
 			cleanup()
@@ -276,7 +327,9 @@ func (b *Backend) Download(ctx context.Context, srcPath, destDir string) (string
 	}
 }
 
-// Shutdown asks the agent process to terminate.
+// Shutdown asks the agent process to terminate, then waits briefly for it to
+// exit and close the connection. If it does not (e.g. a wedged process), the
+// C2 forces the socket shut instead of leaving a dead connection registered.
 func (b *Backend) Shutdown(ctx context.Context) error {
 	pkt, err := protocol.EncodeControl(0, protocol.CmdShutdown, []string{"shutdown"})
 	if err != nil {
@@ -284,6 +337,11 @@ func (b *Backend) Shutdown(ctx context.Context) error {
 	}
 	if err := b.write(pkt); err != nil {
 		return agent.NewNetworkError("shutdown: %v", err)
+	}
+	select {
+	case <-b.done:
+	case <-time.After(shutdownGrace):
+		_ = b.Close()
 	}
 	return nil
 }

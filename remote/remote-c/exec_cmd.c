@@ -61,6 +61,21 @@ char *run_cmd(const char *cmd, int timeout_sec) {
         return xstrdup("Error: cannot start process");
     }
 
+    /* Assign the child to a Job Object so the whole process tree can be
+     * terminated on timeout (TerminateProcess only kills cmd.exe, leaving its
+     * children running and their inherited stdout pipe open). If the agent
+     * already runs inside a job, assignment can fail; fall back to
+     * TerminateProcess then. */
+    HANDLE hJob = CreateJobObjectW(NULL, NULL);
+    BOOL job_ok = FALSE;
+    if (hJob) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli;
+        memset(&jeli, 0, sizeof jeli);
+        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &jeli, sizeof jeli);
+        if (AssignProcessToJobObject(hJob, pi.hProcess)) job_ok = TRUE;
+    }
+
     strbuf_t out;
     sb_init(&out);
     char buf[8192];
@@ -71,7 +86,8 @@ char *run_cmd(const char *cmd, int timeout_sec) {
 
     while (!(done_out && proc_done)) {
         if (now_ms() >= deadline) {
-            TerminateProcess(pi.hProcess, 1);
+            if (job_ok) TerminateJobObject(hJob, 1);
+            else TerminateProcess(pi.hProcess, 1);
             killed = 1;
             break;
         }
@@ -104,6 +120,7 @@ char *run_cmd(const char *cmd, int timeout_sec) {
     CloseHandle(hOutRd);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+    if (hJob) CloseHandle(hJob);
 
     if (killed) {
         sb_free(&out);
@@ -140,7 +157,9 @@ char *run_cmd(const char *cmd, int timeout_sec) {
         return printf_str("Error: %s", strerror(errno));
     }
     if (pid == 0) {
-        /* child */
+        /* child: put itself in its own process group so the whole tree can be
+         * killed on timeout */
+        setpgid(0, 0);
         close(p[0]);
         dup2(p[1], STDOUT_FILENO);
         dup2(p[1], STDERR_FILENO);
@@ -148,6 +167,7 @@ char *run_cmd(const char *cmd, int timeout_sec) {
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
+    setpgid(pid, pid); /* also from the parent to close the race window */
     close(p[1]);
 
     strbuf_t out;
@@ -159,7 +179,7 @@ char *run_cmd(const char *cmd, int timeout_sec) {
     for (;;) {
         int64_t remain = deadline - now_ms();
         if (remain <= 0) {
-            kill(pid, SIGKILL);
+            kill(-pid, SIGKILL); /* negative pid = whole process group */
             killed = 1;
             break;
         }
@@ -172,12 +192,12 @@ char *run_cmd(const char *cmd, int timeout_sec) {
         int sel = (int)select(p[0] + 1, &rfds, NULL, NULL, &tv);
         if (sel < 0) {
             if (errno == EINTR) continue;
-            kill(pid, SIGKILL);
+            kill(-pid, SIGKILL);
             killed = 1;
             break;
         }
         if (sel == 0) {
-            kill(pid, SIGKILL);
+            kill(-pid, SIGKILL); /* negative pid = whole process group */
             killed = 1;
             break;
         }
