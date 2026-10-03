@@ -722,6 +722,11 @@ if (localStorage.getItem('theme') === 'dark') setTheme(true);
 const filesPanel = $('filesPanel'), sidebar = $('sidebar'), commandPanel = $('commandPanel');
 function closePanels() { sidebar.classList.remove('visible'); commandPanel.classList.remove('visible'); filesPanel.classList.remove('visible'); }
 $('sidebarToggleBtn').onclick = () => { const was = sidebar.classList.contains('visible'); closePanels(); if (!was) sidebar.classList.add('visible'); };
+document.addEventListener('click', (e) => {
+    if (!sidebar.classList.contains('visible')) return;
+    if (e.target.closest('#sidebar') || e.target.closest('#sidebarToggleBtn')) return;
+    sidebar.classList.remove('visible');
+});
 $('commandToggleBtn').onclick = () => { const was = commandPanel.classList.contains('visible'); closePanels(); if (!was) { commandPanel.classList.add('visible'); $('commandInput').focus(); } };
 $('filesToggleBtn').onclick = () => { const was = filesPanel.classList.contains('visible'); closePanels(); if (!was) { filesPanel.classList.add('visible'); loadFilesList(); } };
 
