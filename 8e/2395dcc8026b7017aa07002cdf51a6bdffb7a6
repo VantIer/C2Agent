@@ -1,0 +1,25 @@
+internal/agent/shell/windows_exec_integration_test.go
+  s_33269306f06f12::t_a696ef0374eab5 112,121-124
+  s_33269306f06f12::t_2e5e18d5507ac1 50-56
+  s_33269306f06f12::t_e01f227f3ace9b 125
+internal/agent/shell/shellcmd_test.go
+  s_33269306f06f12::t_7149fa75152449 186-208
+internal/agent/shell/shellcmd.go
+  s_33269306f06f12::t_71181d739ce77b 176-181,185-186
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8e2395dcc8026b7017aa07002cdf51a6bdffb7a6",
+  "prompts": {},
+  "sessions": {
+    "s_33269306f06f12": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_edfb934c6ffeRx3Kstyoi3JXEZ",
+        "model": "unknown"
+      },
+      "human_author": "VantIer <vantler@live.cn>"
+    }
+  }
+}
