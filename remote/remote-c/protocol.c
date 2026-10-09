@@ -824,11 +824,50 @@ static void c20_crypt(Chacha20Context *ctx, const uint8_t *in, uint8_t *out, siz
 
 static Chacha20Context g_tx, g_rx;
 
-void crypto_enable_agent(const uint8_t key[32]) {
-    static const uint8_t nonce_c2_to_agent[12] = { 0,0,0,0,0,0,0,0,0,0,0,0 };
-    static const uint8_t nonce_agent_to_c2[12] = { 1,0,0,0,0,0,0,0,0,0,0,0 };
-    c20_init(&g_tx, key, nonce_agent_to_c2); /* agent outbound */
-    c20_init(&g_rx, key, nonce_c2_to_agent); /* agent inbound  */
+/* Derive the per-connection key + nonce for one direction from the shared auth
+ * token and the fresh handshake nonce:
+ *   key(dir)   = SHA256(nonce || token || nonce || dir)          (32 bytes)
+ *   nonce(dir) = SHA256(token || nonce || token || dir)[0:12]    (12 bytes)
+ * dir separates the two directions: 0x01 = C2->Agent, 0x02 = Agent->C2. */
+static void crypto_derive_material(const char *token, const char *nonce,
+                                   uint8_t dir, uint8_t key_out[32],
+                                   uint8_t nonce_out[12]) {
+    size_t tlen = strlen(token);
+    size_t nlen = strlen(nonce);
+    size_t maxlen = tlen + nlen + (nlen > tlen ? nlen : tlen) + 1;
+    uint8_t *buf = (uint8_t *)malloc(maxlen);
+    if (!buf) return;
+    size_t off;
+
+    /* key = SHA256(nonce || token || nonce || dir) */
+    off = 0;
+    memcpy(buf + off, nonce, nlen); off += nlen;
+    memcpy(buf + off, token, tlen); off += tlen;
+    memcpy(buf + off, nonce, nlen); off += nlen;
+    buf[off++] = dir;
+    sha256_digest(buf, off, key_out);
+
+    /* nonce = SHA256(token || nonce || token || dir)[0:12] */
+    off = 0;
+    memcpy(buf + off, token, tlen); off += tlen;
+    memcpy(buf + off, nonce, nlen); off += nlen;
+    memcpy(buf + off, token, tlen); off += tlen;
+    buf[off++] = dir;
+    {
+        uint8_t sum[32];
+        sha256_digest(buf, off, sum);
+        memcpy(nonce_out, sum, 12);
+    }
+
+    free(buf);
+}
+
+void crypto_enable_agent(const char *token, const char *nonce) {
+    uint8_t tx_key[32], rx_key[32], tx_nonce[12], rx_nonce[12];
+    crypto_derive_material(token, nonce, 0x02, tx_key, tx_nonce); /* agent outbound: Agent -> C2 */
+    crypto_derive_material(token, nonce, 0x01, rx_key, rx_nonce); /* agent inbound : C2 -> Agent */
+    c20_init(&g_tx, tx_key, tx_nonce);
+    c20_init(&g_rx, rx_key, rx_nonce);
     g_encrypted = 1;
 }
 

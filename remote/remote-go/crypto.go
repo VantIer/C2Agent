@@ -2,7 +2,8 @@ package main
 
 // ChaCha20 stream cipher (RFC 7539: 256-bit key, 96-bit nonce, 32-bit counter)
 // plus a net.Conn wrapper that transparently encrypts writes and decrypts
-// reads. Key = SHA-256(auth_token); distinct nonces per direction.
+// reads. Both the key and the nonce are derived per connection from the fresh
+// handshake nonce and the shared auth token (one-time key+nonce pair).
 
 import (
 	"crypto/sha256"
@@ -10,13 +11,35 @@ import (
 	"net"
 )
 
-// Directional nonces, kept as immutable value arrays (callers slice them).
-var (
-	nonceC2ToAgent = [12]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	nonceAgentToC2 = [12]byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+// Direction bytes appended to the derivation inputs so the two directions of a
+// connection never share a ChaCha20 keystream.
+const (
+	dirC2ToAgent byte = 0x01 // C2 -> Agent
+	dirAgentToC2 byte = 0x02 // Agent -> C2
 )
 
-func deriveKey(token string) [32]byte { return sha256.Sum256([]byte(token)) }
+// deriveMaterial derives the per-connection ChaCha20 key and nonce for one
+// direction from the shared auth token and the fresh handshake nonce:
+//
+//	key   = SHA-256(nonce || token || nonce || dir)          (32 bytes)
+//	nonce = SHA-256(token || nonce || token || dir)[0:12]    (12 bytes)
+func deriveMaterial(token, handshakeNonce string, dir byte) (key [32]byte, nonce [12]byte) {
+	keyHash := sha256.New()
+	keyHash.Write([]byte(handshakeNonce))
+	keyHash.Write([]byte(token))
+	keyHash.Write([]byte(handshakeNonce))
+	keyHash.Write([]byte{dir})
+	copy(key[:], keyHash.Sum(nil))
+
+	nonceHash := sha256.New()
+	nonceHash.Write([]byte(token))
+	nonceHash.Write([]byte(handshakeNonce))
+	nonceHash.Write([]byte(token))
+	nonceHash.Write([]byte{dir})
+	sum := nonceHash.Sum(nil)
+	copy(nonce[:], sum[:12])
+	return key, nonce
+}
 
 func sha256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))

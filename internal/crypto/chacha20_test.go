@@ -65,9 +65,9 @@ func TestChaCha20EncryptRFC7539(t *testing.T) {
 // Crypt is an involution: applying twice restores the plaintext, including
 // across partial-block boundaries.
 func TestChaCha20RoundTripAcrossBlocks(t *testing.T) {
-	key := DeriveKey("change-me-shared-token")
-	tx := NewChaCha20(key[:], NonceC2ToAgent(), 0)
-	rx := NewChaCha20(key[:], NonceC2ToAgent(), 0)
+	key, nonce := DeriveMaterial("change-me-shared-token", "0123456789abcdef", DirC2ToAgent)
+	tx := NewChaCha20(key[:], nonce[:], 0)
+	rx := NewChaCha20(key[:], nonce[:], 0)
 
 	in := make([]byte, 5000)
 	for i := range in {
@@ -93,12 +93,55 @@ func TestChaCha20RoundTripAcrossBlocks(t *testing.T) {
 	}
 }
 
-// The exported nonce accessors must hand out copies so callers cannot corrupt
-// the shared constants.
-func TestNonceAccessorReturnsCopy(t *testing.T) {
-	n := NonceC2ToAgent()
-	n[0] = 0x7f
-	if NonceC2ToAgent()[0] != 0 {
-		t.Fatal("mutating the returned nonce leaked into the shared constant")
+// DeriveMaterial must be deterministic for the same inputs, distinct per
+// direction, and distinct per handshake nonce (one-time key+nonce).
+func TestDeriveMaterial(t *testing.T) {
+	token := "change-me-shared-token"
+	nonce := "0123456789abcdef"
+
+	k1, n1 := DeriveMaterial(token, nonce, DirC2ToAgent)
+	k2, n2 := DeriveMaterial(token, nonce, DirC2ToAgent)
+	if k1 != k2 || n1 != n2 {
+		t.Fatal("DeriveMaterial is not deterministic")
+	}
+
+	ktx, ntx := DeriveMaterial(token, nonce, DirC2ToAgent)
+	krx, nrx := DeriveMaterial(token, nonce, DirAgentToC2)
+	if ktx == krx || ntx == nrx {
+		t.Fatal("directions must not share a key or nonce")
+	}
+
+	k3, n3 := DeriveMaterial(token, "fedcba9876543210", DirC2ToAgent)
+	if k1 == k3 || n1 == n3 {
+		t.Fatal("different handshake nonces must yield different key/nonce")
+	}
+}
+
+// Cross-language interop vectors: these exact values are also produced by the
+// Python (remote/common/crypto.py) and C (remote/remote-c/protocol.c)
+// implementations for the same inputs; any drift breaks agent interop.
+func TestDeriveMaterialInteropVector(t *testing.T) {
+	token := "change-me-shared-token"
+	nonce := "0123456789abcdef"
+	cases := []struct {
+		dir   byte
+		key   string
+		nonce string
+	}{
+		{DirC2ToAgent,
+			"ea42424fcb14a1a3395d2f013866be2c1c8ab812b8ecd29790f6bda98c4a3dbe",
+			"e6d636597a46b43b686f7aa7"},
+		{DirAgentToC2,
+			"a652964193b67a6d0d2b0787e116c2f05133a1987fb5536df1c4c1f87a64f2ad",
+			"5d88656aeb8a77320e65609f"},
+	}
+	for _, c := range cases {
+		k, n := DeriveMaterial(token, nonce, c.dir)
+		if hex.EncodeToString(k[:]) != c.key {
+			t.Errorf("dir %#x key mismatch\n got %s\nwant %s", c.dir, hex.EncodeToString(k[:]), c.key)
+		}
+		if hex.EncodeToString(n[:]) != c.nonce {
+			t.Errorf("dir %#x nonce mismatch\n got %s\nwant %s", c.dir, hex.EncodeToString(n[:]), c.nonce)
+		}
 	}
 }

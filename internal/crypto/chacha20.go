@@ -2,11 +2,15 @@
 // native-agent connection after registration, plus a net.Conn wrapper that
 // transparently encrypts writes and decrypts reads.
 //
-// Wire parameters (shared with remote-c / remote-py):
+// Wire parameters (shared with remote-c / remote-py). Both the ChaCha20 key and
+// the nonce are derived per connection from the fresh handshake nonce and the
+// shared auth token, so every connection uses a one-time key+nonce pair:
 //
-//	key  = SHA-256(auth_token)            (32 bytes)
-//	nonce C2 -> Agent = 00 * 12
-//	nonce Agent -> C2 = 01 00 * 11
+//	key(dir)   = SHA-256(nonce || token || nonce || dir)          (32 bytes)
+//	nonce(dir) = SHA-256(token || nonce || token || dir)[0:12]    (12 bytes)
+//
+// dir separates the two directions (see DirC2ToAgent / DirAgentToC2) so they
+// never share a keystream.
 //
 // Semantics follow RFC 7539 (256-bit key, 96-bit nonce, 32-bit block counter).
 package crypto
@@ -17,28 +21,38 @@ import (
 	"net"
 )
 
-// Directional nonces. They are kept in unexported value arrays and handed out
-// as fresh copies, so callers cannot mutate the shared constants.
-var (
-	nonceC2ToAgent = [12]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	nonceAgentToC2 = [12]byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+// Direction bytes appended to the key/nonce derivation inputs so the two
+// directions of a connection never share a ChaCha20 keystream.
+const (
+	DirC2ToAgent byte = 0x01 // C2 -> Agent
+	DirAgentToC2 byte = 0x02 // Agent -> C2
 )
 
-// NonceC2ToAgent returns a fresh copy of the C2 -> Agent directional nonce.
-func NonceC2ToAgent() []byte {
-	n := nonceC2ToAgent
-	return n[:]
-}
+// DeriveMaterial derives the per-connection ChaCha20 key and nonce for one
+// direction from the shared auth token and the fresh handshake nonce:
+//
+//	key   = SHA-256(nonce || token || nonce || dir)          (32 bytes)
+//	nonce = SHA-256(token || nonce || token || dir)[0:12]    (12 bytes)
+//
+// The handshake nonce is fresh per connection, so each connection gets a unique
+// key+nonce pair; dir differs per direction, so the two directions never reuse
+// a keystream.
+func DeriveMaterial(authToken, handshakeNonce string, dir byte) (key [32]byte, nonce [12]byte) {
+	keyHash := sha256.New()
+	keyHash.Write([]byte(handshakeNonce))
+	keyHash.Write([]byte(authToken))
+	keyHash.Write([]byte(handshakeNonce))
+	keyHash.Write([]byte{dir})
+	copy(key[:], keyHash.Sum(nil))
 
-// NonceAgentToC2 returns a fresh copy of the Agent -> C2 directional nonce.
-func NonceAgentToC2() []byte {
-	n := nonceAgentToC2
-	return n[:]
-}
-
-// DeriveKey returns SHA-256(authToken).
-func DeriveKey(authToken string) [32]byte {
-	return sha256.Sum256([]byte(authToken))
+	nonceHash := sha256.New()
+	nonceHash.Write([]byte(authToken))
+	nonceHash.Write([]byte(handshakeNonce))
+	nonceHash.Write([]byte(authToken))
+	nonceHash.Write([]byte{dir})
+	sum := nonceHash.Sum(nil)
+	copy(nonce[:], sum[:12])
+	return key, nonce
 }
 
 // ChaCha20 is a stream cipher instance.

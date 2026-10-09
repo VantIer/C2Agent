@@ -57,8 +57,9 @@ CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o c2agent_remote_darwin_arm64 
 
 - **无头守护进程**：主动拨号 → 注册 → 心跳 → 处理指令；断线按指数退避重连。
 - **握手**：`register(随机 nonce，明文)` → 校验 `register_response = sha256(nonce+token)` →
-  `register_confirm(agent_id/hostname/os，已加密)`；其后全流量 ChaCha20
-  （密钥 = `sha256(auth_token)`，方向独立 nonce）。
+  `register_confirm(agent_id/hostname/os，已加密)`；其后全流量 ChaCha20，key 与 nonce
+  每连接由握手 nonce 派生（一次一密）：`key(dir)=sha256(nonce+token+nonce+dir)`、
+  `nonce(dir)=sha256(token+nonce+token+dir)[:12]`，`dir` 区分双向。
 - **心跳**：每 `heartbeat-interval` 秒发送；读取使用读超时以便在空闲时也按时发送。
 - **动作**：`get_cwd` / `list_dir` / `make_dir` / `create_file` / `delete_dir` / `delete_file` /
   `rename_dir` / `rename_file` / `read_file`（整文件截断 51200 字符、支持行范围）/

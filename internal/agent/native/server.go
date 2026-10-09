@@ -157,9 +157,10 @@ func (s *Server) handleConn(raw net.Conn) {
 		return
 	}
 
-	key := crypto.DeriveKey(s.opts.AuthToken)
-	tx := crypto.NewChaCha20(key[:], crypto.NonceC2ToAgent(), 0)
-	rx := crypto.NewChaCha20(key[:], crypto.NonceAgentToC2(), 0)
+	txKey, txNonce := crypto.DeriveMaterial(s.opts.AuthToken, nonce, crypto.DirC2ToAgent)
+	rxKey, rxNonce := crypto.DeriveMaterial(s.opts.AuthToken, nonce, crypto.DirAgentToC2)
+	tx := crypto.NewChaCha20(txKey[:], txNonce[:], 0)
+	rx := crypto.NewChaCha20(rxKey[:], rxNonce[:], 0)
 
 	if pr.Buffered() > 0 {
 		rawBuf := pr.DrainAll()

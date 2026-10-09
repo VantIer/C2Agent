@@ -199,7 +199,7 @@ void     sha256_digest(const void *data, size_t len, uint8_t out[32]);
 void     sha256_hex(const void *data, size_t len, char out[65]);
 
 /* ---------- connection-wide ChaCha20 stream encryption (protocol.c) ----- */
-void     crypto_enable_agent(const uint8_t key[32]);
+void     crypto_enable_agent(const char *token, const char *nonce);
 void     crypto_disable(void);
 
 /* growable string buffer */

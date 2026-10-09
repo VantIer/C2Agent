@@ -5,12 +5,15 @@ Adapted from the reference implementation in ``样例代码/chacha20.c``
 32-bit block counter).
 
 After the registration handshake succeeds, ALL packet traffic is encrypted
-with ChaCha20. Both endpoints derive a 32-byte key from the shared auth
-token via SHA-256, and each direction uses a distinct nonce so the two
-keystreams never collide:
+with ChaCha20. Both endpoints derive the 32-byte key AND the 12-byte nonce
+per connection from the fresh handshake nonce and the shared auth token, so
+every connection uses a one-time key+nonce pair:
 
-  C2 -> Agent : nonce = 00 00 00 00 00 00 00 00 00 00 00 00
-  Agent -> C2 : nonce = 01 00 00 00 00 00 00 00 00 00 00 00
+  key(dir)   = SHA-256(nonce || token || nonce || dir)          (32 bytes)
+  nonce(dir) = SHA-256(token || nonce || token || dir)[0:12]    (12 bytes)
+
+``dir`` separates the two directions (DIR_C2_TO_AGENT / DIR_AGENT_TO_C2) so
+they never share a keystream.
 
 ``EncryptedStream`` transparently encrypts writes / decrypts reads on top
 of an asyncio reader/writer pair, so the rest of the code keeps using the
@@ -19,14 +22,24 @@ familiar ``write()`` / ``drain()`` / ``read()`` interface.
 
 import hashlib
 import struct
+from typing import Tuple
 
-NONCE_C2_TO_AGENT = b"\x00" * 12
-NONCE_AGENT_TO_C2 = b"\x01" + b"\x00" * 11
+DIR_C2_TO_AGENT = 0x01
+DIR_AGENT_TO_C2 = 0x02
 
 
-def derive_key(auth_token: str) -> bytes:
-    """Derive a 32-byte ChaCha20 key from the shared auth token."""
-    return hashlib.sha256(auth_token.encode("utf-8")).digest()
+def derive_material(auth_token: str, handshake_nonce: str, direction: int) -> Tuple[bytes, bytes]:
+    """Derive the per-connection ChaCha20 (key, nonce) for one direction.
+
+    key   = SHA-256(nonce || token || nonce || dir)          (32 bytes)
+    nonce = SHA-256(token || nonce || token || dir)[0:12]    (12 bytes)
+    """
+    token = auth_token.encode("utf-8")
+    nonce = handshake_nonce.encode("utf-8")
+    d = bytes([direction & 0xFF])
+    key = hashlib.sha256(nonce + token + nonce + d).digest()
+    n = hashlib.sha256(token + nonce + token + d).digest()[:12]
+    return key, n
 
 
 class ChaCha20:

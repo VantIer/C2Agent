@@ -20,6 +20,7 @@
 | v0.6 | 2026-09-26 | `read_file` 整文件读取截断上限由 50000 调整为 **51200 字符**（同步改 `remote/` 常量）；明确复用策略：`remote/` **仅允许常量/参数级微调，协议与核心流程不变** |
 | v0.7 | 2026-09-26 | 统一两类受控端下载落盘逻辑：一律 `dl_temp_dir/<basename(srcPath)>`，**重名覆盖**，失败删半成品 |
 | v1.0 | 2026-09-26 | 16 项审核点全部确认，设计**定稿**，进入编码 |
+| v1.1 | 2026-10-09 | 加密升级：Native 链路的 ChaCha20 key+nonce 改为**由握手 nonce 逐连接派生**（一次一密），双向以 `dir` 标记隔离；握手报文格式不变、硬切不保留旧静态方案（§5.2 / §11.3）|
 
 ---
 
@@ -40,8 +41,9 @@
 5. **队列超时语义**：指令在队列中**排队等待不受超时限制**；**开始执行后才受 `cmd_timeout` 限制**。
 6. **CLI + Web 双模式**：交互式 CLI 与浏览器 Web 面板（HTTP + SSE + `go:embed` 内嵌前端；多会话标签、流式对话、会话管理、文件管理器、授权弹窗、Agent 切换）。
    LLM 调用统一使用官方库 **`github.com/openai/openai-go`**。
-7. **复用为主、微小改动**：现有 `remote/` 受控端**协议与核心流程保持不变**（Go C2 逐字节兼容）；
-   仅允许常量/参数级微调（如 `READ_FILE_LIMIT = 51200`），不改动握手、加解密、编解码、调度等主流程。
+7. **复用为主、微小改动**：现有 `remote/` 受控端的**协议报文格式、编解码、调度等主流程保持不变**（Go C2 逐字节兼容）；
+   允许常量/参数级微调（如 `READ_FILE_LIMIT = 51200`）。**例外**：按 v1.1，握手流程与 ChaCha20 的 key/nonce
+   派生统一升级为「一次一密」（见 §5.2），控制端与三个受控端同步硬切，不保留旧版兼容。
 
 **非目标（本期）**：不提供受控端本地 UI（受控端永远无头）；不做生产级抗审查。
 
@@ -303,9 +305,12 @@ Agent                                C2(Go)
   │═══ 此后全字节流 ChaCha20 加密 ════│
 ```
 
-- 密钥 `key = SHA-256(auth_token)`（32 字节），两端本地计算，不上线。
-- 双向独立 nonce：C2→Agent `00*12`；Agent→C2 `01 00*11`。
-- 加密作用于**整条字节流**（含包头/包身/数据包），接收端先解密再分帧。
+- 密钥与 nonce 均由**握手 nonce + token** 派生（两端本地计算，不上线）：
+  - `key(dir) = SHA-256(nonce ‖ token ‖ nonce ‖ dir)`（32 字节，取满）；
+  - `nonce(dir) = SHA-256(token ‖ nonce ‖ token ‖ dir)[0:12]`（12 字节，截取）。
+  - `dir` 为方向标记（`0x01`=C2→Agent，`0x02`=Agent→C2），保证双向不共用密钥流。
+  - 握手 nonce 每连接随机，故**每条连接使用唯一的一组 key+nonce（一次一密）**。
+- 加密作用于**整条字节流**（含包头/包身/数据包），接收端先解密再分帧；counter 沿用现有连续自增设计。
 - `register` / `register_response` 明文；`register_confirm` 起（含）加密。
 - C2 侧 Go 需实现 `EncryptedConn`：包装 `net.Conn` 的 `Read`/`Write` 做流式加解密，
   并在 `_wait_confirm` 阶段复用同一个 rx 上下文（处理 confirm 与首个加密包 TCP 合并到达）。
@@ -835,7 +840,8 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
 
 - 纯 Go ChaCha20（RFC 7539，32B key / 96b nonce / 32b counter），
   经 RFC 7539 §2.3.2 测试向量验证。
-- `DeriveKey(token) = sha256(token)`；nonce 常量同 §5.2。
+- `DeriveMaterial(token, nonce, dir)` 派生每连接的 key+nonce（公式见 §5.2）；
+  跨 Go/C/Python 三端固定测试向量保证一致。
 - `EncryptedConn`：包装 `net.Conn`，`Read` 解密、`Write` 加密，
   维护双向流计数（支持任意粘包/半包边界）。
 
