@@ -1,0 +1,104 @@
+internal/agent/agent.go
+  s_730d8a6dfc9d48::t_068704fdb17caa 154-158,163,165,167-168,170,172-174
+  s_730d8a6dfc9d48::t_71679e065f018e 134
+  s_730d8a6dfc9d48::t_9dcb1a16b0eded 159-162,164,166,169,171
+  s_730d8a6dfc9d48::t_0e3ead9c8d4dbd 89,106
+internal/engine/engine.go
+  s_730d8a6dfc9d48::t_de40bfeff9b1b3 368-373,375
+internal/agent/shell/server.go
+  s_730d8a6dfc9d48::t_201edea6a91df6 46-55
+  s_730d8a6dfc9d48::t_e8aea7881930e8 133-138,140,153,164
+  s_730d8a6dfc9d48::t_44f3e6c3b56ae3 186-188,191,193-222
+  s_730d8a6dfc9d48::t_828acfefffbe42 189-190,192
+internal/agent/shell/integration_test.go
+  s_730d8a6dfc9d48::t_af43395aa9c135 110-197
+internal/agent/shell/shellcmd_test.go
+  s_730d8a6dfc9d48::t_65028669e4a0e9 7
+  s_730d8a6dfc9d48::t_d5e72f290fd269 131,133-144
+  s_730d8a6dfc9d48::t_cf3c141ae3c9e5 145-153,169
+  s_730d8a6dfc9d48::t_66b664a626bf5f 154-164
+  s_730d8a6dfc9d48::t_445c23735de68d 45-46,50,54,58,64-130
+  s_730d8a6dfc9d48::t_111df59774bd05 171,175
+  s_730d8a6dfc9d48::t_efb3885698ca8d 132
+internal/agent/shell/windows_edit_integration_test.go
+  s_730d8a6dfc9d48::t_ba848d39b8ca24 1-137
+internal/cli/cli.go
+  s_730d8a6dfc9d48::t_41e242c27d5e39 162
+internal/agent/shell/windows_exec_integration_test.go
+  s_730d8a6dfc9d48::t_2a398807279e2b 40-42
+  s_730d8a6dfc9d48::t_50dc9cf83a189b 24-26
+  s_730d8a6dfc9d48::t_63c4a42618c878 112-131
+  s_730d8a6dfc9d48::t_5643b6e5082c8e 132-150
+  s_730d8a6dfc9d48::t_3214d08b6da734 151-189
+  s_730d8a6dfc9d48::t_ffba35f7d6ccd4 190-227
+  s_730d8a6dfc9d48::t_bc66a054345f92 239-260
+  s_730d8a6dfc9d48::t_1d621080996554 1-23,27-39,43-103,261-263
+  s_730d8a6dfc9d48::t_e1e57a2d32bf33 228-238
+  s_730d8a6dfc9d48::t_4edb084901fc6e 104-111
+internal/web/server.go
+  s_730d8a6dfc9d48::t_f55aef9fd0e4db 154-155
+  s_730d8a6dfc9d48::t_0d94b1ea6dcd75 156
+internal/web/ui/index.html
+  s_730d8a6dfc9d48::t_6b54336c498070 447
+internal/agent/shell/transfer_test.go
+  s_730d8a6dfc9d48::t_5e0a250dd25e29 69
+  s_730d8a6dfc9d48::t_e2ae2c3ca1842e 198-199,202,205,208,211,214
+internal/agent/shell/shellcmd.go
+  s_730d8a6dfc9d48::t_43f3b7ffdf2dfa 176-182
+  s_730d8a6dfc9d48::t_2c17bb5f5dc48e 248-254,256-257,261-262
+  s_730d8a6dfc9d48::t_7745f94c044618 336,338,340-342,344
+  s_730d8a6dfc9d48::t_d4f2318c1d42fd 121-124
+  s_730d8a6dfc9d48::t_27027a6f1183d3 299-300,302
+  s_730d8a6dfc9d48::t_7877f902733ccb 692-695
+  s_730d8a6dfc9d48::t_2a533f184c8f7e 146-153
+  s_730d8a6dfc9d48::t_f50dfbb2ae0054 504-505,508
+  s_730d8a6dfc9d48::t_6cbd0e33948b1e 519
+  s_730d8a6dfc9d48::t_22f080a4e0a3de 11,17-32,34,45-51,53-76,80,84-85,87-91,104-110,112,115-120,126-127,129-144,155-175,183-203,208,210-215,218,234-235,240-243,246,255,258-260,263-286,291-298,306,329-331,333,337,347-349,353,381,386,395-397,403-405,410-412,420,439-441,447,462-464,472-474,483-485,494-496,501,506-507,513-518,523,528-562,634,666-669,673-675,678,684,686,689,691,697,699,701,703,713-771
+  s_730d8a6dfc9d48::t_7b6e82d3116bf2 145
+  s_730d8a6dfc9d48::t_5024587dd64052 86
+  s_730d8a6dfc9d48::t_91f5e7ac714818 125
+  s_730d8a6dfc9d48::t_6031f460667d7d 236-239,244-245
+  s_730d8a6dfc9d48::t_98b08ee7920182 77-79,82-83,95-99,101
+  s_730d8a6dfc9d48::t_a5b2a46feb66aa 35-38
+  s_730d8a6dfc9d48::t_e0c60d2383cf53 399-400,407
+  s_730d8a6dfc9d48::t_2c9ec0fcd24962 448-449,452,458
+  s_730d8a6dfc9d48::t_1b3da00c9a6705 520-522,524-527
+  s_730d8a6dfc9d48::t_4346ce331e4c67 604,609,631-633
+  s_730d8a6dfc9d48::t_73533bd60796d7 204-207,209
+  s_730d8a6dfc9d48::t_ee7cd7bcecd5d2 216-217,219-233
+  s_730d8a6dfc9d48::t_9b274a04a909eb 154
+  s_730d8a6dfc9d48::t_212ffd667d90bd 81
+  s_730d8a6dfc9d48::t_88b8960f19e451 247
+  s_730d8a6dfc9d48::t_db01b4682ee504 563
+  s_730d8a6dfc9d48::t_9d45cc38e3c91c 772
+internal/engine/session.go
+  s_730d8a6dfc9d48::t_13cab48b059e05 188
+internal/agent/shell/backend.go
+  s_730d8a6dfc9d48::t_3bb79ca21f84e8 454,468
+  s_730d8a6dfc9d48::t_9d89932d6aa2e8 531,533
+  s_730d8a6dfc9d48::t_cbb1db66a5fac5 53,66-72
+  s_730d8a6dfc9d48::t_7bb65418c53572 501,507
+  s_730d8a6dfc9d48::t_a3f6a700587521 251,260,277-282,284-285,287-290
+  s_730d8a6dfc9d48::t_2001a10d86ba8a 333
+  s_730d8a6dfc9d48::t_ee3f72fa72c0d6 313-314,322
+  s_730d8a6dfc9d48::t_95e8f9a0ac046c 407
+  s_730d8a6dfc9d48::t_8336614eeadf7c 357,374
+  s_730d8a6dfc9d48::t_9d39602ca29f2f 384-385,390
+  s_730d8a6dfc9d48::t_9932cf7135fec6 418
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ca165376d3667857ccae75f071706d66d7f0cdf3",
+  "prompts": {},
+  "sessions": {
+    "s_730d8a6dfc9d48": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_ee00f52f2ffed5sHfmgG3Ac8vS",
+        "model": "unknown"
+      },
+      "human_author": "VantIer <vantler@live.cn>"
+    }
+  }
+}
