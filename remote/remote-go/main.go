@@ -258,8 +258,8 @@ func handshake(conn net.Conn, o *options) (*encryptedConn, *packetReader, error)
 
 	txKey, txNonce := deriveMaterial(o.authToken, nonce, dirAgentToC2)
 	rxKey, rxNonce := deriveMaterial(o.authToken, nonce, dirC2ToAgent)
-	tx := newChaCha20(txKey[:], txNonce[:], 0)
-	rx := newChaCha20(rxKey[:], rxNonce[:], 0)
+	tx := newChaCha20(txKey, txNonce, 0)
+	rx := newChaCha20(rxKey, rxNonce, 0)
 	enc := newEncryptedConn(conn, tx, rx)
 
 	host, err := os.Hostname()

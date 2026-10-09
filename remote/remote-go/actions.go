@@ -42,7 +42,7 @@ func runAction(cmd uint8, params []string, cmdTimeout time.Duration) string {
 	case cmdWriteFile:
 		return writeFile(arg(params, 0), arg(params, 1))
 	case cmdEditFile:
-		return editFile(arg(params, 0), arg(params, 1), arg(params, 2), arg(params, 3), arg(params, 4))
+		return editFile(arg(params, 0), arg(params, 1), arg(params, 2))
 	case cmdCopy:
 		return copyPath(arg(params, 0), arg(params, 1))
 	case cmdMove:
@@ -147,6 +147,9 @@ func deletePath(path string, wantDir bool) string {
 }
 
 func renamePath(path, newName string) string {
+	if newName == "" || strings.ContainsAny(newName, `/\`) {
+		return "Error: new_name must be a bare name without path separators"
+	}
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			return "Path does not exist: " + path
@@ -263,7 +266,11 @@ func writeFile(path, content string) string {
 	return "Successfully wrote to: " + path
 }
 
-func editFile(path, operation, startLine, endLine, content string) string {
+// editFile replaces the single occurrence of oldText with newText, mirroring
+// the control end and Zed's edit_file: it fails closed (reports an error) when
+// oldText is missing or not unique, so the model re-reads or adds context
+// rather than editing the wrong location. CRLF/LF differences are tolerated.
+func editFile(path, oldText, newText string) string {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -278,59 +285,54 @@ func editFile(path, operation, startLine, endLine, content string) string {
 	if err != nil {
 		return "Error editing file: " + err.Error()
 	}
-	lines := splitKeepEnds(string(data))
-	start := 0
-	if strings.TrimSpace(startLine) != "" && strings.TrimSpace(startLine) != "0" {
-		v, err := strconv.Atoi(strings.TrimSpace(startLine))
-		if err != nil {
-			return fmt.Sprintf("Invalid line numbers: start_line=%s, end_line=%s", startLine, endLine)
-		}
-		start = v - 1
-		if start < 0 {
-			start = 0
-		}
+	edited, editErr := applyStringEdit(string(data), oldText, newText)
+	if editErr != "" {
+		return "Error: " + editErr
 	}
-	end := len(lines)
-	if strings.TrimSpace(endLine) != "" && strings.TrimSpace(endLine) != "0" {
-		if v, err := strconv.Atoi(strings.TrimSpace(endLine)); err == nil {
-			end = v
-		}
-	}
-	switch operation {
-	case "add":
-		if start > len(lines) {
-			start = len(lines)
-		}
-		lines = append(lines[:start], append([]string{content + "\n"}, lines[start:]...)...)
-	case "del":
-		if start >= len(lines) {
-			return fmt.Sprintf("Start line %s exceeds file line count (%d)", startLine, len(lines))
-		}
-		if end > len(lines) {
-			end = len(lines)
-		}
-		if end < start {
-			end = start
-		}
-		lines = append(lines[:start], lines[end:]...)
-	case "modify":
-		if start >= len(lines) {
-			return fmt.Sprintf("Start line %s exceeds file line count (%d)", startLine, len(lines))
-		}
-		if end > len(lines) {
-			end = len(lines)
-		}
-		if end < start {
-			end = start
-		}
-		lines = append(lines[:start], append([]string{content + "\n"}, lines[end:]...)...)
-	default:
-		return "Unknown operation: " + operation + ". Use 'add', 'del', or 'modify'"
-	}
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "")), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
 		return "Error editing file: " + err.Error()
 	}
-	return fmt.Sprintf("Successfully performed %s on file: %s", operation, path)
+	return "Successfully edited file: " + path
+}
+
+// applyStringEdit replaces the single occurrence of oldText in content with
+// newText. Content and oldText are normalized to LF for the search and the
+// file's original newline style is restored on write. Returns the edited
+// content plus an error message ("" on success).
+func applyStringEdit(content, oldText, newText string) (string, string) {
+	if oldText == "" {
+		return "", "old_text must not be empty"
+	}
+	hadCRLF := strings.Contains(content, "\r\n")
+	work := strings.ReplaceAll(content, "\r\n", "\n")
+	needle := strings.ReplaceAll(oldText, "\r\n", "\n")
+	replacement := strings.ReplaceAll(newText, "\r\n", "\n")
+
+	idx, count := -1, 0
+	// Advance by one byte so overlapping occurrences are counted too.
+	for from := 0; ; {
+		j := strings.Index(work[from:], needle)
+		if j < 0 {
+			break
+		}
+		pos := from + j
+		if count == 0 {
+			idx = pos
+		}
+		count++
+		from = pos + 1
+	}
+	switch {
+	case count == 0:
+		return "", "old_text not found in file; read the file again to get the exact current content."
+	case count > 1:
+		return "", fmt.Sprintf("old_text matched %d locations; include more surrounding context to make it unique.", count)
+	}
+	out := work[:idx] + replacement + work[idx+len(needle):]
+	if hadCRLF {
+		out = strings.ReplaceAll(out, "\n", "\r\n")
+	}
+	return out, ""
 }
 
 func copyPath(src, dest string) string {
@@ -421,21 +423,4 @@ func copyTree(src, dest string) error {
 		}
 	}
 	return nil
-}
-
-func splitKeepEnds(s string) []string {
-	if s == "" {
-		return nil
-	}
-	var out []string
-	for len(s) > 0 {
-		i := strings.IndexByte(s, '\n')
-		if i < 0 {
-			out = append(out, s)
-			break
-		}
-		out = append(out, s[:i+1])
-		s = s[i+1:]
-	}
-	return out
 }

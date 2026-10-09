@@ -17,11 +17,12 @@ func mustHex(t *testing.T, s string) []byte {
 
 // RFC 7539 section 2.3.2 keystream vector.
 func TestChaCha20KeystreamRFC7539(t *testing.T) {
-	key := make([]byte, 32)
+	var key [32]byte
 	for i := range key {
 		key[i] = byte(i)
 	}
-	nonce := mustHex(t, "000000090000004a00000000")
+	var nonce [12]byte
+	copy(nonce[:], mustHex(t, "000000090000004a00000000"))
 	want := mustHex(t,
 		"10f1e7e4d13b5915500fdd1fa32071c4"+
 			"c7d1f4c733c068030422aa9ac3d46c4e"+
@@ -38,11 +39,12 @@ func TestChaCha20KeystreamRFC7539(t *testing.T) {
 
 // RFC 7539 section 2.4.2 encryption vector.
 func TestChaCha20EncryptRFC7539(t *testing.T) {
-	key := make([]byte, 32)
+	var key [32]byte
 	for i := range key {
 		key[i] = byte(i)
 	}
-	nonce := mustHex(t, "000000000000004a00000000")
+	var nonce [12]byte
+	copy(nonce[:], mustHex(t, "000000000000004a00000000"))
 	plaintext := []byte("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.")
 	want := mustHex(t,
 		"6e2e359a2568f98041ba0728dd0d6981"+
@@ -66,8 +68,8 @@ func TestChaCha20EncryptRFC7539(t *testing.T) {
 // across partial-block boundaries.
 func TestChaCha20RoundTripAcrossBlocks(t *testing.T) {
 	key, nonce := DeriveMaterial("change-me-shared-token", "0123456789abcdef", DirC2ToAgent)
-	tx := NewChaCha20(key[:], nonce[:], 0)
-	rx := NewChaCha20(key[:], nonce[:], 0)
+	tx := NewChaCha20(key, nonce, 0)
+	rx := NewChaCha20(key, nonce, 0)
 
 	in := make([]byte, 5000)
 	for i := range in {

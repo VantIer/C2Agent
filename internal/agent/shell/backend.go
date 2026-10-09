@@ -5,9 +5,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -247,9 +249,15 @@ func (b *Backend) Execute(ctx context.Context, action string, params map[string]
 		return "Error: empty shell command", nil
 	}
 	var out string
-	if action == "read_file" {
+	switch {
+	case action == "read_file" && b.osName == "Windows":
+		// Windows read commands return base64, which never looks like a shell
+		// prompt, so the prompt/echo-stripping path is safe and more robust.
+		out, err = b.request(ctx, cmd)
+	case action == "read_file":
+		// POSIX reads return raw file content; preserve it verbatim.
 		out, err = b.requestRaw(ctx, cmd)
-	} else {
+	default:
 		out, err = b.request(ctx, cmd)
 	}
 	if err != nil {
@@ -260,7 +268,7 @@ func (b *Backend) Execute(ctx context.Context, action string, params map[string]
 		out = formatListing(out)
 	case "read_file":
 		if b.osName == "Windows" {
-			out = decodeReadFile(out, params)
+			out = decodeReadFile(out)
 		}
 		// Match the native agents: whole-file reads are capped at 51200 chars.
 		if s := paramString(params["start_line"]); s == "" || s == "0" {
@@ -270,51 +278,183 @@ func (b *Backend) Execute(ctx context.Context, action string, params map[string]
 	return out, nil
 }
 
-// Upload base64-encodes the local file and writes it in one instruction.
+// Upload streams a local file to destPath in fixed-size chunks. The control end
+// drives the offset loop (read a local chunk -> base64 -> one append command),
+// so the shell bot's memory is bounded regardless of file size. The file is
+// written to a temporary remote path and renamed into place only after the size
+// is verified, so a failed transfer never leaves a partially written destination.
 func (b *Backend) Upload(ctx context.Context, localPath, destPath string) (string, error) {
-	data, err := os.ReadFile(localPath)
-	if err != nil {
-		return "Error: cannot read local file: " + err.Error(), nil
+	info, err := os.Stat(localPath)
+	if err != nil || info.IsDir() {
+		return "Error: local file not found: " + localPath, nil
 	}
-	b64 := base64.StdEncoding.EncodeToString(data)
-	cmd, err := writeBase64Cmd(b.osName, destPath, b64)
+	f, err := os.Open(localPath)
+	if err != nil {
+		return "Error: cannot open local file: " + err.Error(), nil
+	}
+	defer f.Close()
+
+	base := agent.BaseName(destPath)
+	tmpPath := remoteJoin(remoteParent(destPath), base+".c2part-"+randToken(), b.osName)
+	createCmd, err := truncateCreateCmd(b.osName, tmpPath)
 	if err != nil {
 		return "Error: " + err.Error(), nil
 	}
-	out, err := b.request(ctx, cmd)
-	if err != nil {
+	if _, err := b.request(ctx, createCmd); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(out) == "" {
-		return fmt.Sprintf("Successfully uploaded: %s (%d bytes)", destPath, len(data)), nil
+
+	chunk := transferChunkSize(b.osName)
+	buf := make([]byte, chunk)
+	total := int64(0)
+	for {
+		if cerr := ctx.Err(); cerr != nil {
+			b.removeRemote(tmpPath)
+			return "", cerr
+		}
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			b64 := base64.StdEncoding.EncodeToString(buf[:n])
+			appendCmd, aerr := appendBase64Cmd(b.osName, tmpPath, b64)
+			if aerr != nil {
+				b.removeRemote(tmpPath)
+				return "Error: " + aerr.Error(), nil
+			}
+			if _, werr := b.request(ctx, appendCmd); werr != nil {
+				b.removeRemote(tmpPath)
+				return "", werr
+			}
+			total += int64(n)
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			b.removeRemote(tmpPath)
+			return "", rerr
+		}
 	}
-	return out, nil
+
+	if !b.verifyRemoteSize(ctx, tmpPath, total) {
+		b.removeRemote(tmpPath)
+		return "Error: upload verification failed", nil
+	}
+	renCmd, err := renameCmd(b.osName, tmpPath, base)
+	if err != nil {
+		b.removeRemote(tmpPath)
+		return "Error: " + err.Error(), nil
+	}
+	if _, err := b.request(ctx, renCmd); err != nil {
+		b.removeRemote(tmpPath)
+		return "", err
+	}
+	return fmt.Sprintf("Successfully uploaded: %s (%d bytes)", destPath, total), nil
 }
 
-// Download fetches the file as base64 and lands it in
-// <destDir>/<basename(srcPath)>.
+// Download streams <srcPath> into <destDir>/<basename(srcPath)>. The control end
+// drives the offset loop (one read command per chunk), so the shell bot's memory
+// is bounded regardless of file size; the local file is written to a temporary
+// path and renamed into place after the size is verified.
 func (b *Backend) Download(ctx context.Context, srcPath, destDir string) (string, error) {
-	cmd, err := readBase64Cmd(b.osName, srcPath)
+	sizeCmd, err := fileSizeCmd(b.osName, srcPath)
 	if err != nil {
 		return "", agent.NewNetworkError("%v", err)
 	}
-	out, err := b.request(ctx, cmd)
+	out, err := b.request(ctx, sizeCmd)
 	if err != nil {
 		return "", err
 	}
-	data, ok := decodeBase64(out)
-	if !ok {
-		trimmed := strings.TrimSpace(out)
-		if trimmed == "" {
-			trimmed = "empty response"
+	size, perr := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if perr != nil {
+		msg := strings.TrimSpace(out)
+		if msg == "" {
+			msg = "cannot stat source"
 		}
-		return "", agent.NewNetworkError("download: %s", trimmed)
+		return "", agent.NewNetworkError("download: %s", msg)
 	}
+	if size < 0 {
+		size = 0
+	}
+
 	dest := filepath.Join(destDir, agent.BaseName(srcPath))
-	if err := os.WriteFile(dest, data, 0o644); err != nil {
+	tmp := dest + ".c2part-" + randToken()
+	f, err := os.Create(tmp)
+	if err != nil {
+		return "", err
+	}
+	cleanup := func() {
+		f.Close()
+		_ = os.Remove(tmp)
+	}
+
+	chunk := int64(transferChunkSize(b.osName))
+	read := int64(0)
+	for read < size {
+		if cerr := ctx.Err(); cerr != nil {
+			cleanup()
+			return "", cerr
+		}
+		n := chunk
+		if size-read < n {
+			n = size - read
+		}
+		chunkCmd, cerr := readChunkCmd(b.osName, srcPath, read, n)
+		if cerr != nil {
+			cleanup()
+			return "", agent.NewNetworkError("%v", cerr)
+		}
+		// base64 output has no prompt-like lines, so the prompt/echo-stripping
+		// `request` is used instead of the verbatim `requestRaw`.
+		chunkOut, rerr := b.request(ctx, chunkCmd)
+		if rerr != nil {
+			cleanup()
+			return "", rerr
+		}
+		data, ok := decodeBase64(chunkOut)
+		if !ok || int64(len(data)) != n {
+			cleanup()
+			return "", agent.NewNetworkError("download: bad chunk at offset %d", read)
+		}
+		if _, werr := f.Write(data); werr != nil {
+			cleanup()
+			return "", werr
+		}
+		read += n
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		_ = os.Remove(tmp)
 		return "", err
 	}
 	return dest, nil
+}
+
+// verifyRemoteSize reports whether the remote file now has exactly want bytes.
+func (b *Backend) verifyRemoteSize(ctx context.Context, path string, want int64) bool {
+	sizeCmd, err := fileSizeCmd(b.osName, path)
+	if err != nil {
+		return false
+	}
+	out, err := b.request(ctx, sizeCmd)
+	if err != nil {
+		return false
+	}
+	got, perr := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	return perr == nil && got == want
+}
+
+// removeRemote best-effort deletes a remote temporary file.
+func (b *Backend) removeRemote(path string) {
+	cmd, err := removeCmd(b.osName, path)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = b.request(ctx, cmd)
 }
 
 // Shutdown closes the shell by sending "exit", then waits briefly for the
@@ -341,70 +481,108 @@ func (b *Backend) editFile(ctx context.Context, params map[string]any) (string, 
 	if path == "" {
 		return "Error: missing path", nil
 	}
-	readCmd, err := readFileCmd(b.osName, path, "", "")
+	limit := maxEditBytes(b.osName)
+	begin := randSentinel("B")
+	end := randSentinel("E")
+	missing := randSentinel("M")
+	// Read one byte past the writable limit so a file that is too large to
+	// rewrite is detected before we attempt (and fail) the write.
+	readCmd, err := readFileWrappedCmd(b.osName, path, begin, end, missing, limit+1)
 	if err != nil {
 		return "Error: " + err.Error(), nil
 	}
-	content, err := b.requestRaw(ctx, readCmd)
+	out, err := b.requestRaw(ctx, readCmd)
 	if err != nil {
 		return "", err
 	}
-	if b.osName == "Windows" {
-		if data, ok := decodeBase64(content); ok {
-			content = string(data)
-		}
+	content, perr := extractWrappedEdit(out, begin, end, missing)
+	if perr != "" {
+		return "Error: " + perr, nil
 	}
-	stripped := strings.TrimSpace(content)
-	low := strings.ToLower(stripped)
-	if strings.HasPrefix(stripped, "Error:") || strings.HasPrefix(stripped, "cat:") ||
-		strings.HasPrefix(stripped, "sed:") || strings.HasPrefix(low, "cannot") {
-		return stripped, nil
+	if len(content) > limit {
+		return "Error: file too large for a shell bot; use a native agent", nil
 	}
-	edited, ok := applyEdit(content,
-		paramString(params["operation"]),
-		paramString(params["start_line"]),
-		paramString(params["end_line"]),
-		paramString(params["content"]))
-	if !ok {
-		return "Error: bad edit request", nil
+	edited, editErr := applyStringEdit(content,
+		paramString(params["old_text"]),
+		paramString(params["new_text"]))
+	if editErr != "" {
+		return "Error: " + editErr, nil
 	}
+	// Write to a temporary sibling, then rename into place, so a failed write
+	// never truncates the original file.
+	base := agent.BaseName(path)
+	tmpPath := remoteJoin(remoteParent(path), base+".c2part-"+randToken(), b.osName)
 	b64 := base64.StdEncoding.EncodeToString([]byte(edited))
-	writeCmd, err := writeBase64Cmd(b.osName, path, b64)
+	writeCmd, err := writeBase64Cmd(b.osName, tmpPath, b64)
 	if err != nil {
 		return "Error: " + err.Error(), nil
 	}
 	if _, err := b.request(ctx, writeCmd); err != nil {
+		b.removeRemote(tmpPath)
 		return "", err
 	}
-	return fmt.Sprintf("Successfully performed %s on file: %s", paramString(params["operation"]), path), nil
+	renCmd, rerr := renameCmd(b.osName, tmpPath, base)
+	if rerr != nil {
+		b.removeRemote(tmpPath)
+		return "Error: " + rerr.Error(), nil
+	}
+	if _, err := b.request(ctx, renCmd); err != nil {
+		b.removeRemote(tmpPath)
+		return "", err
+	}
+	// A shell command's failure is not a transport error, so verify the end
+	// state: the destination must now be exactly the size we wrote.
+	if !b.verifyRemoteSize(ctx, path, int64(len(edited))) {
+		return "Error: edit verification failed", nil
+	}
+	return "Successfully edited file: " + path, nil
 }
 
-func decodeReadFile(b64out string, params map[string]any) string {
+// extractWrappedEdit pulls the base64 payload out of a sentinel-wrapped read,
+// returning the decoded content and an error message ("" on success). Because
+// the payload is framed and verified by base64 decoding, file content that
+// happens to look like an error message is never misread as a read failure.
+func extractWrappedEdit(out, begin, end, missing string) (string, string) {
+	lines := strings.Split(out, "\n")
+	for _, l := range lines {
+		if strings.TrimSpace(l) == missing {
+			return "", "file not found, not readable, or not a regular file"
+		}
+	}
+	bi := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == begin {
+			bi = i
+			break
+		}
+	}
+	if bi < 0 {
+		return "", "unexpected response while reading file"
+	}
+	ei := -1
+	for i := bi + 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == end {
+			ei = i
+			break
+		}
+	}
+	if ei < 0 {
+		return "", "unexpected response while reading file"
+	}
+	data, ok := decodeBase64(strings.Join(lines[bi+1:ei], ""))
+	if !ok {
+		return "", "could not decode file content"
+	}
+	return string(data), ""
+}
+
+// decodeReadFile base64-decodes a Windows read_file result. Windows read
+// commands already return exactly the requested bytes (a bounded whole-file head
+// or the exact line range), so no further slicing happens here.
+func decodeReadFile(b64out string) string {
 	data, ok := decodeBase64(b64out)
 	if !ok {
 		return b64out
 	}
-	content := string(data)
-	start := strings.TrimSpace(paramString(params["start_line"]))
-	if start == "" || start == "0" {
-		return content
-	}
-	s, err := atoiSafe(start)
-	if err != nil {
-		return "Error: invalid start_line: " + start
-	}
-	if s < 1 {
-		s = 1
-	}
-	lines := strings.Split(content, "\n")
-	if s-1 >= len(lines) {
-		return ""
-	}
-	end := len(lines)
-	if e := strings.TrimSpace(paramString(params["end_line"])); e != "" {
-		if ev, err := atoiSafe(e); err == nil && ev >= s && ev <= len(lines) {
-			end = ev
-		}
-	}
-	return strings.Join(lines[s-1:end], "\n")
+	return string(data)
 }

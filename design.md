@@ -264,7 +264,7 @@ C2Agent/
 | 0x05 | read_file | `path`,`start_line`,`end_line` |
 | 0x06 | write_file | `path`,`content` |
 | 0x07 | delete_file | `path` |
-| 0x08 | edit_file | `path`,`operation`,`start_line`,`end_line`,`content` |
+| 0x08 | edit_file | `path`,`old_text`,`new_text` |
 | 0x09 | rename_file | `path`,`new_name` |
 | 0x0A | copy | `src`,`dest` |
 | 0x0B | move | `src`,`dest` |
@@ -391,19 +391,31 @@ shell -> C2:      <交互式回显，若有>
 - `write_file`/upload：`printf '<b64>' | base64 -d > dest`（分段）/
   `[IO.File]::WriteAllBytes` + `AppendAllBytes`
 - `delete`：`rm -rf` / `Remove-Item -Recurse -Force`
-- `edit_file`：读 → C2 改行 → base64 写回
+- `edit_file`：读取文件 → 按 `old_text`/`new_text` 精确替换（`old_text` 须唯一匹配，否则报错）→ base64 写回
 - `exec_cmd`：原样命令（安全检查）
 - Windows 一律构造**无 `$` 的 PowerShell 调用**，兼容 cmd 与 PowerShell 两种反弹。
 - `list_dir` 输出由 C2 `format_listing` 归一化为 `DIR/FILE <size> <name>`。
 
-### 6.4 base64 文件传输
+### 6.4 分段流式文件传输（C2 驱动）
 
-- 上传 = 读取文件 → base64 → 与解码保存命令合并为**一条指令**。
-  - POSIX 分块 100000（受 `ARG_MAX` 限制）；Windows 分块 8000（受命令行长度限制）。
-- 下载 = 执行 `base64 <file>`（Windows `[Convert]::ToBase64String`），C2 解码后
-  **统一落盘到 `dl_temp_dir/<basename(srcPath)>`（重名覆盖）**，与 Native 端规则完全一致（§7.2）。
-- 约束：Windows 上受外层 shell 命令行长度限制（cmd 约 6KB、PowerShell iex 约几十 KB）；
-  路径含 `%name%` 变量模式时拒绝（cmd 无法安全转义）。
+传输由 **C2 端循环控制**，受控端只接受单条指令按**指定偏移**读取/追加，因此两端内存
+都有界，大文件不再受单条命令长度限制：
+
+- **下载**：C2 先取文件大小（`wc -c < f` / `(Get-Item).Length`），再循环发
+  「读取偏移 offset、长度 chunk 的一段并 base64 回传」指令：
+  - POSIX：`tail -c +<offset+1> f | head -c <chunk> | base64`
+  - Windows：`[IO.File]::OpenRead` → `Seek(offset)` → `Read(chunk)` → `ToBase64String`
+  C2 逐段 base64 解码写入本地临时文件，校验总大小后原子重命名到 `dl_temp_dir/<basename>`。
+- **上传**：C2 先建/清空远端目标（`truncateCreate`），再循环把本地 chunk base64 后
+  以「解码并**追加**到目标」指令发送：
+  - POSIX：`printf '%s' '<b64>' | base64 -d >> f`
+  - Windows：`[IO.File]::Open(Append)` → `Write(FromBase64String('<b64>'))`
+  全部写完并校验大小一致后，`mv` 原子重命名到目标；失败则删除临时文件。
+- 分块：POSIX 32768B、Windows 4096B（编码后仍在内层 shell 命令行长度内）。
+- **跨 OS 路径**：C2 可能与受控端异 OS，远端临时路径用受控端分隔符构造（不用 C2 的
+  `filepath`）。路径含 `%name%` 变量模式时拒绝（cmd 无法安全转义）。
+- **行范围读（Windows）**：`read_file` 带行号范围时用 `[IO.File]::ReadLines` **惰性**枚举，
+  内存与请求范围成正比，深层范围无需整文件读入（POSIX 用 `sed`）。
 
 ### 6.5 在线与关闭
 
@@ -512,7 +524,6 @@ const (
     PhaseLLM      Phase = "llm"
     PhaseExec     Phase = "exec"
     PhaseAuthWait Phase = "auth_wait"
-    PhaseDone     Phase = "done"
 )
 
 type Session struct {
@@ -635,7 +646,7 @@ C2 将动作表编译为 OpenAI tools。每个动作一个 function：
 | make_dir | **path** |
 | rename_file | **path**, **new_name** |
 | rename_dir | **path**, **new_name** |
-| edit_file | **path**, **operation**(add/del/modify), start_line, end_line, content |
+| edit_file | **path**, **old_text**, **new_text**（精确片段替换；`old_text` 须唯一匹配，删除用空 `new_text`） |
 | copy | **src**, **dest** |
 | move | **src**, **dest** |
 | exec_cmd | **command** |
@@ -869,8 +880,13 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
   OS 探测 → hostname → `Registry.Register`。EOF 即移除。
 - **backend.go**：`request(cmd)` 写 `cmd\necho <marker>\n`，等 marker 行，
   `stripShellResponse` 清理回显/提示符；线性调度（busy 则拒绝）。
-- **shellcmd.go**：动作 → 单条 shell 命令（按 OS），含 base64 上传/下载构造与
-  `formatListing` 归一化。
+  `edit_file` 用**哨兵包裹 + base64** 读取（`readFileWrappedCmd`/`extractWrappedEdit`），
+  正文即使以 `Error:` 等开头也不会被误判为读取失败；文件超过可回写上限时明确拒绝。
+- **shellcmd.go**：动作 → 单条 shell 命令（按 OS），含 `formatListing` 归一化，以及
+  分段传输命令（`fileSizeCmd`/`readChunkCmd`/`truncateCreateCmd`/`appendBase64Cmd`）。
+  读取统一限长：整文件读最多 `readFileByteCap` 字节（**所有平台**，避免大文件耗尽内存）；
+  Windows 行范围读用惰性 `ReadLines`（内存有界且支持深层范围）；`upload`/`download`
+  由 C2 循环按偏移分段（见 §6.4），受控端只执行单条读/追加指令。
 
 ### 11.7 `internal/engine`
 

@@ -35,7 +35,7 @@ ACTION_CMDS = {
     0x05: ("read_file",   ["path", "start_line", "end_line"]),
     0x06: ("write_file",  ["path", "content"]),
     0x07: ("delete_file", ["path"]),
-    0x08: ("edit_file",   ["path", "operation", "start_line", "end_line", "content"]),
+    0x08: ("edit_file",   ["path", "old_text", "new_text"]),
     0x09: ("rename_file", ["path", "new_name"]),
     0x0A: ("copy",        ["src", "dest"]),
     0x0B: ("move",        ["src", "dest"]),

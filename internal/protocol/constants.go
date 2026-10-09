@@ -77,7 +77,7 @@ var Actions = []Action{
 	{CmdReadFile, "read_file", []string{"path", "start_line", "end_line"}},
 	{CmdWriteFile, "write_file", []string{"path", "content"}},
 	{CmdDeleteFile, "delete_file", []string{"path"}},
-	{CmdEditFile, "edit_file", []string{"path", "operation", "start_line", "end_line", "content"}},
+	{CmdEditFile, "edit_file", []string{"path", "old_text", "new_text"}},
 	{CmdRenameFile, "rename_file", []string{"path", "new_name"}},
 	{CmdCopy, "copy", []string{"src", "dest"}},
 	{CmdMove, "move", []string{"src", "dest"}},

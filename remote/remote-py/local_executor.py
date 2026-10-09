@@ -77,6 +77,8 @@ def delete(path: str, want_dir: bool = False) -> str:
 
 def rename(path: str, new_name: str) -> str:
     try:
+        if not new_name or "/" in new_name or "\\" in new_name:
+            return "Error: new_name must be a bare name without path separators"
         target = Path(path).resolve()
         if not target.exists():
             return f"Path does not exist: {path}"
@@ -144,44 +146,51 @@ def write_file(path: str, content: str) -> str:
         return f"Error writing file: {str(e)}"
 
 
-def edit_file(path: str, operation: str, start_line: str, end_line: str, content: str = "") -> str:
+def edit_file(path: str, old_text: str, new_text: str = "") -> str:
+    """Replace the single occurrence of ``old_text`` with ``new_text``.
+
+    Mirrors Zed's edit_file: it fails closed when ``old_text`` is missing or not
+    unique, so the model re-reads or adds more context instead of editing the
+    wrong location. Matching tolerates CRLF/LF differences and the file's
+    original newline style is preserved on write.
+    """
     try:
         target = Path(path).resolve()
         if not target.exists():
             return f"File does not exist: {path}"
         if target.is_dir():
             return f"{path} is a directory"
-        with open(target, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        try:
-            start = max(0, int(start_line) - 1)
-        except ValueError:
-            return f"Invalid start_line: {start_line}"
-        end = len(lines)
-        if end_line and end_line != "0":
-            try:
-                end = int(end_line)
-            except ValueError:
-                end = len(lines)
-        if operation == "add":
-            insert_pos = start
-            lines.insert(insert_pos, content + "\n")
-        elif operation == "del":
-            end = min(len(lines), end)
-            if start >= len(lines):
-                return f"Start line {start_line} exceeds file line count ({len(lines)})"
-            del lines[start:end]
-        elif operation == "modify":
-            end = min(len(lines), end)
-            if start >= len(lines):
-                return f"Start line {start_line} exceeds file line count ({len(lines)})"
-            del lines[start:end]
-            lines.insert(start, content + "\n")
-        else:
-            return f"Unknown operation: {operation}. Use 'add', 'del', or 'modify'"
-        with open(target, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-        return f"Successfully performed {operation} on file: {path}"
+        if not old_text:
+            return "Error: old_text must not be empty"
+        raw = target.read_bytes()
+        had_crlf = b"\r\n" in raw
+        work = raw.replace(b"\r\n", b"\n")
+        needle = old_text.encode("utf-8").replace(b"\r\n", b"\n")
+        replacement = new_text.encode("utf-8").replace(b"\r\n", b"\n")
+        if not needle:
+            return "Error: old_text must not be empty"
+        positions = []
+        start = 0
+        while True:
+            i = work.find(needle, start)
+            if i < 0:
+                break
+            positions.append(i)
+            # Advance by one byte so overlapping occurrences are counted too.
+            start = i + 1
+        if not positions:
+            return "Error: old_text not found in file; read the file again to get the exact current content."
+        if len(positions) > 1:
+            return (
+                f"Error: old_text matched {len(positions)} locations; "
+                "include more surrounding context to make it unique."
+            )
+        i = positions[0]
+        out = work[:i] + replacement + work[i + len(needle):]
+        if had_crlf:
+            out = out.replace(b"\n", b"\r\n")
+        target.write_bytes(out)
+        return f"Successfully edited file: {path}"
     except Exception as e:
         return f"Error editing file: {str(e)}"
 
@@ -278,7 +287,7 @@ ACTION_HANDLERS = {
     "read_file":   lambda p: read_file(p[0], p[1], p[2]),
     "write_file":  lambda p: write_file(p[0], p[1]),
     "delete_file": lambda p: delete(p[0], False),
-    "edit_file":   lambda p: edit_file(p[0], p[1], p[2], p[3], p[4]),
+    "edit_file":   lambda p: edit_file(p[0], p[1], p[2] if len(p) > 2 else ""),
     "rename_file": lambda p: rename(p[0], p[1]),
     "copy":        lambda p: copy(p[0], p[1]),
     "move":        lambda p: move(p[0], p[1]),

@@ -63,11 +63,9 @@ type ChaCha20 struct {
 }
 
 // NewChaCha20 creates a cipher with the given 32-byte key, 12-byte nonce and
-// initial block counter.
-func NewChaCha20(key, nonce []byte, counter uint32) *ChaCha20 {
-	if len(key) != 32 || len(nonce) != 12 {
-		panic("crypto: ChaCha20 requires a 32-byte key and 12-byte nonce")
-	}
+// initial block counter. The fixed-size array parameters make an invalid
+// key/nonce length impossible at compile time (no runtime panic).
+func NewChaCha20(key [32]byte, nonce [12]byte, counter uint32) *ChaCha20 {
 	c := &ChaCha20{}
 	c.state[0] = 0x61707865
 	c.state[1] = 0x3320646e

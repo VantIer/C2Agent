@@ -18,7 +18,7 @@ import (
 type Kind string
 
 const (
-	KindNative Kind = "native" // binary protocol (remote-c / remote-py)
+	KindNative Kind = "native" // binary protocol (remote-c / remote-py / remote-go)
 	KindShell  Kind = "shell"  // raw reverse shell
 )
 

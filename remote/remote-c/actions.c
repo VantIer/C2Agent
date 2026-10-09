@@ -282,6 +282,8 @@ static char *act_rename(char **p, int n) {
     if (n < 2) return xstrdup("Error: missing rename params");
     const char *path = p[0];
     const char *new_name = p[1];
+    if (!new_name[0] || strchr(new_name, '/') || strchr(new_name, '\\'))
+        return xstrdup("Error: new_name must be a bare name without path separators");
     if (!path_exists(path)) return printf_str("Path does not exist: %s", path);
     char newpath[PROTO_MAX_PATH];
     path_with_name(path, new_name, newpath, sizeof newpath);
@@ -407,144 +409,101 @@ static char *act_write_file(char **p, int n) {
     return printf_str("Successfully wrote to: %s", path);
 }
 
+/* Copy s into a fresh buffer with CRLF collapsed to LF. */
+static char *normalize_lf(const char *s, size_t len, size_t *out_len) {
+    char *out = (char *)malloc(len + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\r' && i + 1 < len && s[i + 1] == '\n') continue;
+        out[o++] = s[i];
+    }
+    out[o] = 0;
+    *out_len = o;
+    return out;
+}
+
+/* Replace the single occurrence of old_text with new_text, mirroring the Go /
+ * Python agents and Zed's edit_file: fail closed when old_text is missing or
+ * not unique, so the model re-reads or adds context instead of editing the
+ * wrong location. CRLF/LF differences are tolerated and the file's original
+ * newline style is restored on write. */
 static char *act_edit_file(char **p, int n) {
-    if (n < 4) return xstrdup("Error: missing edit_file params");
+    if (n < 2) return xstrdup("Error: missing edit_file params");
     const char *path = p[0];
-    const char *op = p[1];
-    const char *sl = p[2];
-    const char *el = p[3];
-    const char *content = (n > 4) ? p[4] : "";
+    const char *old_text = p[1];
+    const char *new_text = (n > 2) ? p[2] : "";
 
     if (!path_exists(path)) return printf_str("File does not exist: %s", path);
     if (is_dir(path)) return printf_str("%s is a directory", path);
+    if (old_text[0] == 0) return xstrdup("Error: old_text must not be empty");
 
     size_t blen = 0;
     char *raw = slurp(path, &blen);
     if (!raw) return printf_str("Error editing file: %s", strerror(errno));
 
-    /* parse into line list (each line includes trailing '\n') */
-    typedef struct { char *s; } ll_t;
-    ll_t *ll = (ll_t *)malloc(sizeof(ll_t) * 128);
-    int cap = 128, nlines = 0;
-    if (!ll) { free(raw); return xstrdup("Error editing file: out of memory"); }
-    size_t i = 0;
-    while (i < blen) {
-        size_t s = i;
-        while (i < blen && raw[i] != '\n') i++;
-        size_t e = (i < blen) ? i + 1 : i;
-        if (nlines == cap) {
-            cap *= 2;
-            ll_t *nl = (ll_t *)realloc(ll, (size_t)cap * sizeof(ll_t));
-            if (!nl) { free(ll); free(raw); return xstrdup("Error editing file: out of memory"); }
-            ll = nl;
-        }
-        ll[nlines].s = (char *)malloc(e - s + 1);
-        if (!ll[nlines].s) { free(ll); free(raw); return xstrdup("Error editing file: out of memory"); }
-        memcpy(ll[nlines].s, raw + s, e - s);
-        ll[nlines].s[e - s] = 0;
-        nlines++;
-        i = e;
+    int had_crlf = 0;
+    for (size_t k = 0; k + 1 < blen; k++) {
+        if (raw[k] == '\r' && raw[k + 1] == '\n') { had_crlf = 1; break; }
     }
+
+    size_t wlen = 0, ndlen = 0, rl = 0;
+    char *work = normalize_lf(raw, blen, &wlen);
     free(raw);
-
-    int start = atoi(sl);
-    if (start < 1) start = 1;
-    int s = start - 1;
-    /* end defaults to end-of-file (matches the Go/shell agents); an invalid
-     * end_line also falls back to it. */
-    int end = nlines;
-    if (el && el[0] && strcmp(el, "0") != 0) {
-        char *endp = NULL;
-        long v = strtol(el, &endp, 10);
-        if (endp != el && *endp == '\0' && v > 0) end = (int)v;
-    }
-    if (end > nlines) end = nlines;
-
-    int ok = 1;
-    char *err = NULL;
-
-    if (strcmp(op, "add") == 0) {
-        if (s > nlines) s = nlines;
-        /* insert content + '\n' at s */
-        ll_t *nl = (ll_t *)realloc(ll, (size_t)(cap + 1) * sizeof(ll_t));
-        if (!nl) { ok = 0; err = xstrdup("Error editing file: out of memory"); }
-        else {
-            ll = nl;
-            memmove(&ll[s + 1], &ll[s], (size_t)(nlines - s) * sizeof(ll_t));
-            size_t clen = strlen(content);
-            ll[s].s = (char *)malloc(clen + 2);
-            if (!ll[s].s) { ok = 0; err = xstrdup("Error editing file: out of memory"); }
-            else {
-                memcpy(ll[s].s, content, clen);
-                ll[s].s[clen] = '\n';
-                ll[s].s[clen + 1] = 0;
-                nlines++;
-            }
-        }
-    } else if (strcmp(op, "del") == 0) {
-        if (s >= nlines) {
-            ok = 0;
-            err = printf_str("Start line %s exceeds file line count (%d)", sl, nlines);
-        } else {
-            if (end < s) end = s;
-            if (end > nlines) end = nlines;
-            for (int k = s; k < end; k++) free(ll[k].s);
-            memmove(&ll[s], &ll[end], (size_t)(nlines - end) * sizeof(ll_t));
-            nlines -= (end - s);
-        }
-    } else if (strcmp(op, "modify") == 0) {
-        if (s >= nlines) {
-            ok = 0;
-            err = printf_str("Start line %s exceeds file line count (%d)", sl, nlines);
-        } else {
-            if (end < s) end = s;
-            if (end > nlines) end = nlines;
-            for (int k = s; k < end; k++) free(ll[k].s);
-            memmove(&ll[s], &ll[end], (size_t)(nlines - end) * sizeof(ll_t));
-            nlines -= (end - s);
-            /* insert content + '\n' at s */
-            ll_t *nl = (ll_t *)realloc(ll, (size_t)(cap + 1) * sizeof(ll_t));
-            if (!nl) { ok = 0; err = xstrdup("Error editing file: out of memory"); }
-            else {
-                ll = nl;
-                memmove(&ll[s + 1], &ll[s], (size_t)(nlines - s) * sizeof(ll_t));
-                size_t clen = strlen(content);
-                ll[s].s = (char *)malloc(clen + 2);
-                if (!ll[s].s) { ok = 0; err = xstrdup("Error editing file: out of memory"); }
-                else {
-                    memcpy(ll[s].s, content, clen);
-                    ll[s].s[clen] = '\n';
-                    ll[s].s[clen + 1] = 0;
-                    nlines++;
-                }
-            }
-        }
-    } else {
-        ok = 0;
-        err = printf_str("Unknown operation: %s. Use 'add', 'del', or 'modify'", op);
+    if (!work) return xstrdup("Error editing file: out of memory");
+    char *needle = normalize_lf(old_text, strlen(old_text), &ndlen);
+    if (!needle) { free(work); return xstrdup("Error editing file: out of memory"); }
+    char *repl = normalize_lf(new_text, strlen(new_text), &rl);
+    if (!repl) { free(work); free(needle); return xstrdup("Error editing file: out of memory"); }
+    if (ndlen == 0) {
+        free(work); free(needle); free(repl);
+        return xstrdup("Error: old_text must not be empty");
     }
 
-    if (!ok) {
-        for (int k = 0; k < nlines; k++) free(ll[k].s);
-        free(ll);
-        return err;
+    size_t first = 0, count = 0;
+    /* Advance by one byte so overlapping occurrences are counted too. */
+    for (size_t pos = 0; pos + ndlen <= wlen; pos++) {
+        if (memcmp(work + pos, needle, ndlen) == 0) {
+            if (count == 0) first = pos;
+            count++;
+        }
     }
+    if (count == 0) {
+        free(work); free(needle); free(repl);
+        return xstrdup("Error: old_text not found in file; read the file again to get the exact current content.");
+    }
+    if (count > 1) {
+        char *e = printf_str("Error: old_text matched %d locations; include more surrounding context to make it unique.", (int)count);
+        free(work); free(needle); free(repl);
+        return e;
+    }
+
+    size_t outlen = wlen - ndlen + rl;
+    char *out = (char *)malloc(outlen + 1);
+    if (!out) { free(work); free(needle); free(repl); return xstrdup("Error editing file: out of memory"); }
+    memcpy(out, work, first);
+    memcpy(out + first, repl, rl);
+    memcpy(out + first + rl, work + first + ndlen, wlen - first - ndlen);
+    out[outlen] = 0;
+    free(work); free(needle); free(repl);
 
     FILE *f = c2a_fopen(path, "wb");
     if (!f) {
         char *e2 = printf_str("Error editing file: %s", strerror(errno));
-        for (int k = 0; k < nlines; k++) free(ll[k].s);
-        free(ll);
+        free(out);
         return e2;
     }
-    for (int k = 0; k < nlines; k++) {
-        size_t clen = strlen(ll[k].s);
-        if (clen) fwrite(ll[k].s, 1, clen, f);
+    if (had_crlf) {
+        for (size_t k = 0; k < outlen; k++) {
+            if (out[k] == '\n') { fputc('\r', f); fputc('\n', f); }
+            else fputc((unsigned char)out[k], f);
+        }
+    } else if (outlen) {
+        fwrite(out, 1, outlen, f);
     }
     fclose(f);
-    for (int k = 0; k < nlines; k++) free(ll[k].s);
-    free(ll);
-    return printf_str("Successfully performed %s on file: %s", op, path);
+    free(out);
+    return printf_str("Successfully edited file: %s", path);
 }
 
 static char *act_copy(char **p, int n) {

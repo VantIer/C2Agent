@@ -58,10 +58,7 @@ type chacha20 struct {
 	pos       int
 }
 
-func newChaCha20(key, nonce []byte, counter uint32) *chacha20 {
-	if len(key) != 32 || len(nonce) != 12 {
-		panic("chacha20: bad key/nonce size")
-	}
+func newChaCha20(key [32]byte, nonce [12]byte, counter uint32) *chacha20 {
 	c := &chacha20{}
 	c.state[0], c.state[1], c.state[2], c.state[3] = 0x61707865, 0x3320646e, 0x79622d32, 0x6b206574
 	for i := 0; i < 8; i++ {

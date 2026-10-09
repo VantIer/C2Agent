@@ -75,9 +75,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(data)
 }
 
 func readJSON(r *http.Request, v any) error {
@@ -332,7 +337,10 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func sendSSE(w http.ResponseWriter, f http.Flusher, v any) {
-	data, _ := json.Marshal(v)
+	data, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	f.Flush()
 }
@@ -535,12 +543,17 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]any{"error": err.Error()})
 		return
 	}
+	if info, serr := os.Stat(dest); serr != nil || !info.Mode().IsRegular() {
+		writeJSON(w, 500, map[string]any{"error": "downloaded file unavailable"})
+		return
+	}
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(dest)}))
 	http.ServeFile(w, r, dest)
 }
 
 func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(64 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<20)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}

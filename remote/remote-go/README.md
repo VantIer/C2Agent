@@ -63,7 +63,7 @@ CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o c2agent_remote_darwin_arm64 
 - **心跳**：每 `heartbeat-interval` 秒发送；读取使用读超时以便在空闲时也按时发送。
 - **动作**：`get_cwd` / `list_dir` / `make_dir` / `create_file` / `delete_dir` / `delete_file` /
   `rename_dir` / `rename_file` / `read_file`（整文件截断 51200 字符、支持行范围）/
-  `write_file` / `edit_file`(add/del/modify) / `copy` / `move` / `exec_cmd`（带超时）。
+  `write_file` / `edit_file`（`old_text`→`new_text` 精确唯一替换）/ `copy` / `move` / `exec_cmd`（带超时）。
 - **文件传输**：`upload`（接收 1024B 数据包落盘）/ `download`（分块发送）。
 - **Windows**：`exec_cmd` 经 `cmd /C` 执行；子进程按控制台/OEM 代码页输出的字节会由 `exec_windows.go` 转码为 UTF-8（取 `GetConsoleOutputCP`，回退 `GetOEMCP`），非 ASCII（如中文）可直接显示。
 

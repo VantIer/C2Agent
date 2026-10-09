@@ -226,6 +226,13 @@ func (e *Engine) runConversation(s *Session) {
 			return
 		}
 
+		if res == nil {
+			e.persistPartial(s)
+			seq := s.addTranscript("system", "[LLM Error] empty response")
+			e.publish(s, seq, Event{"type": "llm_error", "error": "empty response"})
+			return
+		}
+
 		s.mu.Lock()
 		s.history = append(s.history, res.Raw)
 		s.text = ""

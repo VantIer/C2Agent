@@ -75,8 +75,8 @@ func TestNativeEndToEnd(t *testing.T) {
 		// 3. enable ChaCha20 and send register_confirm (encrypted)
 		txKey, txNonce := crypto.DeriveMaterial(token, nonce, crypto.DirAgentToC2)
 		rxKey, rxNonce := crypto.DeriveMaterial(token, nonce, crypto.DirC2ToAgent)
-		tx := crypto.NewChaCha20(txKey[:], txNonce[:], 0)
-		rx := crypto.NewChaCha20(rxKey[:], rxNonce[:], 0)
+		tx := crypto.NewChaCha20(txKey, txNonce, 0)
+		rx := crypto.NewChaCha20(rxKey, rxNonce, 0)
 		enc := crypto.NewEncryptedConn(conn, tx, rx)
 
 		conf, _ := protocol.EncodeControl(2, protocol.CmdRegisterConfirm, []string{"agent-1", "host-1", "Linux"})

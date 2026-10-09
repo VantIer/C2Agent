@@ -76,7 +76,7 @@ var actionParams = map[uint8][]string{
 	cmdReadFile:   {"path", "start_line", "end_line"},
 	cmdWriteFile:  {"path", "content"},
 	cmdDeleteFile: {"path"},
-	cmdEditFile:   {"path", "operation", "start_line", "end_line", "content"},
+	cmdEditFile:   {"path", "old_text", "new_text"},
 	cmdRenameFile: {"path", "new_name"},
 	cmdCopy:       {"src", "dest"},
 	cmdMove:       {"src", "dest"},

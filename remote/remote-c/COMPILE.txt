@@ -77,7 +77,7 @@ the connection is dropped. See common/protocol.py.
 
 Implemented actions: get_cwd, list_dir, make_dir, create_file, delete_dir,
 delete_file, rename_dir, rename_file, read_file (51200-char whole-file limit,
-line ranges), write_file, edit_file (add/del/modify), copy (file+tree), move,
+line ranges), write_file, edit_file (exact old_text -> new_text replace), copy (file+tree), move,
 exec_cmd (stdout+stderr, timeout), upload, download.
 
 Encoding: the wire protocol and all internal strings are UTF-8. On Windows
@@ -86,3 +86,7 @@ _mkdir, _wrename, _wremove, GetCurrentDirectory, GetComputerName) transcodes
 UTF-8 <-> UTF-16 and uses the wide-character API, so non-ASCII (e.g. Chinese)
 commands, paths and file names work. Console output is decoded from the OEM code
 page to UTF-8. On POSIX the byte-oriented standard calls are used unchanged.
+
+Self-tests (from this directory): tests/crypto_selftest.c verifies the
+cross-language key/nonce vectors, tests/edit_selftest.c verifies the exact-string
+edit semantics. Build/run commands are in the header comment of each file.

