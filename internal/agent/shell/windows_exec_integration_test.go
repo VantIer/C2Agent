@@ -47,6 +47,13 @@ func TestGeneratedWindowsCommandsExecute(t *testing.T) {
 	if err := os.WriteFile(path, want, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Digit-leading / purely numeric directory names must survive list_dir
+	// (Format-Table used to drop their leading digits or whole name).
+	for _, n := range []string{"123", "1abc", "99dir"} {
+		if err := os.Mkdir(filepath.Join(dir, n), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	for _, tgt := range []target{
 		{os: "Windows", env: EnvPowerShell},
@@ -102,7 +109,7 @@ func TestGeneratedWindowsCommandsExecute(t *testing.T) {
 				t.Fatalf("write mismatch: got %q want %q", rewritten, content)
 			}
 
-			// list_dir must render the Windows table formatListing understands.
+			// list_dir emits already-normalized DIR/FILE lines.
 			lsCmd, err := listDirCmd(tgt, dir)
 			if err != nil {
 				t.Fatal(err)
@@ -110,6 +117,11 @@ func TestGeneratedWindowsCommandsExecute(t *testing.T) {
 			listing := formatListing(runOnHost(t, tgt, lsCmd))
 			if !strings.Contains(listing, "FILE") || !strings.Contains(listing, "c2_test.txt") {
 				t.Fatalf("listing not normalized: %q", listing)
+			}
+			for _, want := range []string{"DIR 0 123", "DIR 0 1abc", "DIR 0 99dir"} {
+				if !strings.Contains(listing, want) {
+					t.Fatalf("listing %q missing %q", listing, want)
+				}
 			}
 			// A missing path must produce a locale-independent "Error:".
 			missCmd, err := listDirCmd(tgt, filepath.Join(dir, "nope_"+tgt.env))

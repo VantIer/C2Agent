@@ -183,15 +183,29 @@ func decodeUTF16LE(t *testing.T, b []byte) string {
 	return string(utf16.Decode(u))
 }
 
-func TestFormatListingWindows(t *testing.T) {
-	header := "PSIsContainer Length Name\n------------- ------ ----"
-	if got := formatListing(header); got != "Empty directory" {
-		t.Fatalf("header-only Windows listing = %q, want %q", got, "Empty directory")
+// psListDir emits already-normalized lines; formatListing must pass them
+// through untouched, including names that are numeric or start with digits
+// (the old Format-Table parsing dropped their leading digits / whole name).
+func TestFormatListingStructuredPassthrough(t *testing.T) {
+	in := "DIR 0 123\nDIR 0 1abc\nDIR 0 99dir\nFILE 4 42file.txt\nFILE 7 7"
+	if got := formatListing(in); got != in {
+		t.Fatalf("structured listing = %q, want %q", got, in)
 	}
-	table := header + "\n        False   12 a.txt\n         True        docs"
-	got := formatListing(table)
-	if !strings.Contains(got, "FILE 12 a.txt") || !strings.Contains(got, "DIR 0 docs") {
-		t.Fatalf("Windows listing = %q", got)
+}
+
+// POSIX `ls -la` names captured by the trailing group must also keep numeric
+// prefixes intact.
+func TestFormatListingPosixNumericNames(t *testing.T) {
+	out := "total 8\n" +
+		"drwxr-xr-x 2 u u 4096 Jan  1 00:00 123\n" +
+		"drwxr-xr-x 2 u u 4096 Jan  1 00:00 1abc\n" +
+		"-rw-r--r-- 1 u u   42 Jan  1 00:00 42file.txt\n" +
+		"-rw-r--r-- 1 u u    7 Jan  1 00:00 7"
+	got := formatListing(out)
+	for _, want := range []string{"DIR 0 123", "DIR 0 1abc", "FILE 42 42file.txt", "FILE 7 7"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("POSIX numeric listing = %q, missing %q", got, want)
+		}
 	}
 }
 

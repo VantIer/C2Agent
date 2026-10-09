@@ -173,13 +173,17 @@ func psGetCwd() string { return "(Get-Location).Path" }
 
 func psListDir(path string) string {
 	p := psLiteral(path)
-	// Test-Path makes misses locale-independent; the explicit empty check makes
-	// an empty directory report "Empty directory" (Format-Table emits nothing
-	// for empty input), matching the native agents.
+	// Emit machine-parseable "DIR <size> <name>" / "FILE <size> <name>" lines.
+	// Format-Table is deliberately avoided: its right-aligned Length column is
+	// empty for directories, so a directory whose name is numeric or begins with
+	// a digit (e.g. "123", "1abc") was misread as a size + truncated name and
+	// lost its leading digits (or its whole name). Test-Path keeps misses
+	// locale-independent; the explicit empty check preserves "Empty directory".
 	return "if(Test-Path -LiteralPath " + p + " -PathType Container){" +
 		"$c2i=@(Get-ChildItem -Force -LiteralPath " + p + ");" +
 		"if($c2i.Count -eq 0){'Empty directory'}" +
-		"else{$c2i | Select-Object PSIsContainer,Length,Name | Format-Table -AutoSize}" +
+		"else{$c2i | ForEach-Object { $c2t=if($_.PSIsContainer){'DIR'}else{'FILE'};" +
+		"$c2s=if($_.PSIsContainer){0}else{$_.Length};$c2t + ' ' + $c2s + ' ' + $_.Name }}" +
 		"}elseif(Test-Path -LiteralPath " + p + " -PathType Leaf){'Error: ' + " + p + " + ' is a file'}" +
 		"else{'Error: path not found: ' + " + p + "}"
 }
@@ -603,7 +607,6 @@ func randToken() string {
 
 var (
 	dirFileRe = regexp.MustCompile(`^(DIR|FILE)\s+\d+\s+.+$`)
-	winTable  = regexp.MustCompile(`^\s*(True|False)\s+(\d*)\s*(.+?)\s*$`)
 	lsLine    = regexp.MustCompile(`^([dl-])[^\s]*\s+\d+\s+\S+\s+\S+\s+(\d+)\s+\S+\s+\S+\s+\S+\s+(.+?)\s*$`)
 )
 
@@ -630,49 +633,6 @@ func formatListing(output string) string {
 			}
 		}
 		return strings.Join(out, "\n")
-	}
-
-	win := false
-	for _, l := range lines {
-		if strings.Contains(l, "PSIsContainer") {
-			win = true
-			break
-		}
-	}
-	if win {
-		var items []string
-		dataLines := 0
-		for _, l := range lines {
-			if strings.TrimSpace(l) == "" || strings.HasPrefix(strings.TrimSpace(l), "PSIsContainer") || strings.HasPrefix(strings.TrimSpace(l), "-") {
-				continue
-			}
-			dataLines++
-			m := winTable.FindStringSubmatch(l)
-			if m == nil {
-				continue
-			}
-			name := strings.TrimRight(m[3], " ")
-			if name == "." || name == ".." {
-				continue
-			}
-			typ := "FILE"
-			if m[1] == "True" {
-				typ = "DIR"
-			}
-			size := m[2]
-			if size == "" || typ == "DIR" {
-				size = "0"
-			}
-			items = append(items, typ+" "+size+" "+name)
-		}
-		if len(items) > 0 {
-			return strings.Join(items, "\n")
-		}
-		if dataLines == 0 {
-			// Header-only output == empty directory; match the native agents.
-			return "Empty directory"
-		}
-		return output
 	}
 
 	var items []string
