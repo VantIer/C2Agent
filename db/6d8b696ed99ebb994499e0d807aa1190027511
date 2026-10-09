@@ -1,0 +1,55 @@
+remote/remote-go/crypto.go
+  s_137a6dd8bdf522::t_a0810973ed7906 5-6,14-18,21-42
+remote/remote-go/README.md
+  s_137a6dd8bdf522::t_945f61ff788f63 60-62
+internal/agent/native/integration_test.go
+  s_137a6dd8bdf522::t_f1e718bd9f18c8 76-79
+remote/common/crypto.py
+  s_137a6dd8bdf522::t_41c8e35cc47464 8-10,12-16,25-28,31-32,34-42
+remote/remote-c/agent.h
+  s_137a6dd8bdf522::t_84b76366c69742 202
+internal/crypto/chacha20.go
+  s_137a6dd8bdf522::t_7c5a3bd0b6bc85 24-28,31-46,48-55
+  s_137a6dd8bdf522::t_a770e46d1eede4 5-7,9-13
+remote/remote-go/main.go
+  s_137a6dd8bdf522::t_9a5d55ec6c74d8 259-262
+remote/remote-c/protocol.c
+  s_137a6dd8bdf522::t_89447dc6322057 827-870
+internal/agent/native/server.go
+  s_137a6dd8bdf522::t_652642322bbbfd 160-163
+internal/crypto/chacha20_test.go
+  s_137a6dd8bdf522::t_56c65870b5a31b 96-116
+  s_137a6dd8bdf522::t_4fc47bbc2a5601 68-70
+  s_137a6dd8bdf522::t_d4db4c191a98bd 117,119-145
+  s_137a6dd8bdf522::t_57a2e7f5b4c52c 118
+design.md
+  s_137a6dd8bdf522::t_0db87bb647fd38 23
+  s_137a6dd8bdf522::t_637f797f45f919 44-46
+  s_137a6dd8bdf522::t_eaa7dd51e17959 308-313
+  s_137a6dd8bdf522::t_7f00c1bffbdea0 843-844
+README.md
+  s_137a6dd8bdf522::t_7ba0d9b2e49956 562-566
+  s_137a6dd8bdf522::t_61ed39f1021220 267-269
+remote/remote-c/main.c
+  s_137a6dd8bdf522::t_367cbc004f0b64 323-325
+remote/remote-py/agent_client.py
+  s_137a6dd8bdf522::t_8c38cfc16b2b6d 139,147-152,163,168-173,184
+  s_137a6dd8bdf522::t_8f931595313fee 98-104
+  s_137a6dd8bdf522::t_ee48c42721813d 21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "db6d8b696ed99ebb994499e0d807aa1190027511",
+  "prompts": {},
+  "sessions": {
+    "s_137a6dd8bdf522": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_ee1eafc16ffeJbStsGoF7NMHsR",
+        "model": "unknown"
+      },
+      "human_author": "VantIer <vantler@live.cn>"
+    }
+  }
+}
