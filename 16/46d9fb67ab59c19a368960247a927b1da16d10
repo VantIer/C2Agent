@@ -1,0 +1,42 @@
+internal/agent/shell/windows_exec_integration_test.go
+  s_33269306f06f12::t_fcf7957a10e0d0 139-140
+  s_33269306f06f12::t_6e0c7a0bbd92e8 56,66,71-72
+  s_33269306f06f12::t_cd4d4a295ed7e0 73,75-86
+  s_33269306f06f12::t_0c144e9f8e747a 61-63
+  s_33269306f06f12::t_1c93491f9ced11 74
+internal/agent/shell/shellcmd.go
+  s_33269306f06f12::t_7cfdf6abf1e13c 80-96
+  s_33269306f06f12::t_d69a6693d14daa 143-146
+  s_33269306f06f12::t_9ea270ca3edea2 346
+  s_33269306f06f12::t_cf59ea8095d07f 152-157,159-161
+  s_33269306f06f12::t_9ca9041defafc5 199,203-208
+  s_33269306f06f12::t_336ce4690b51d7 216-217,219-222
+internal/agent/shell/shellcmd_test.go
+  s_33269306f06f12::t_d4ed1ba9d86c1f 212
+  s_33269306f06f12::t_75fc271e3b53c5 37-56
+  s_33269306f06f12::t_0bc36e5a63b4dc 130,141-154
+  s_33269306f06f12::t_3cf6c25998b38d 57-77,155
+  s_33269306f06f12::t_3109c227928128 156
+internal/agent/shell/backend.go
+  s_33269306f06f12::t_dd47c3988d9caa 278-280,282
+  s_33269306f06f12::t_3fe3bc69203984 421-430
+  s_33269306f06f12::t_da0d4f6bc67997 452-457,460,464-479,481-487
+  s_33269306f06f12::t_c01f21c1fe089e 582-584,611-623
+  s_33269306f06f12::t_cf3002149bba2b 374,378
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1646d9fb67ab59c19a368960247a927b1da16d10",
+  "prompts": {},
+  "sessions": {
+    "s_33269306f06f12": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_edfb934c6ffeRx3Kstyoi3JXEZ",
+        "model": "unknown"
+      },
+      "human_author": "VantIer <vantler@live.cn>"
+    }
+  }
+}
