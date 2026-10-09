@@ -151,8 +151,9 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	for _, a := range reg.List() {
 		list = append(list, map[string]any{
 			"id": a.ID, "kind": string(a.Kind), "hostname": a.Hostname,
-			"os": a.OS, "connected_at": a.ConnectedAt.Unix(),
-			"active": a.ID == reg.ActiveID(),
+			"os": a.OS, "env": a.Env, "system_name": a.SystemName(),
+			"connected_at": a.ConnectedAt.Unix(),
+			"active":       a.ID == reg.ActiveID(),
 		})
 	}
 	writeJSON(w, 200, map[string]any{"agents": list, "active": reg.ActiveID()})

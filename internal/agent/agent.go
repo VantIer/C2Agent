@@ -86,6 +86,7 @@ type Options struct {
 	Kind          Kind
 	Hostname      string
 	OS            string
+	Env           string // execution environment (shell bots only): PowerShell/cmd/bash/sh
 	Backend       Backend
 	QueueCapacity int
 	CmdTimeout    time.Duration
@@ -102,6 +103,7 @@ type Agent struct {
 	Kind        Kind
 	Hostname    string
 	OS          string
+	Env         string // shell bots: detected interpreter; native: empty
 	ConnectedAt time.Time
 
 	Backend Backend
@@ -129,6 +131,7 @@ func New(o Options) *Agent {
 		Kind:          o.Kind,
 		Hostname:      o.Hostname,
 		OS:            o.OS,
+		Env:           o.Env,
 		ConnectedAt:   time.Now(),
 		Backend:       o.Backend,
 		jobs:          make(chan *Job, capacity),
@@ -147,6 +150,27 @@ func (a *Agent) TouchHB() { a.lastHB.Store(time.Now().UnixNano()) }
 
 // LastHB returns the last heartbeat time.
 func (a *Agent) LastHB() time.Time { return time.Unix(0, a.lastHB.Load()) }
+
+// SystemName is the target description injected into the system prompt as
+// {system_name}. Shell bots report "OS Env" (e.g. "Windows PowerShell") so the
+// model knows which command syntax to use; native agents have no interpreter
+// and report just the OS.
+func (a *Agent) SystemName() string {
+	env := a.Env
+	if env == "Unknown" {
+		env = ""
+	}
+	switch {
+	case a.OS == "" && env == "":
+		return "Unknown"
+	case env == "":
+		return a.OS
+	case a.OS == "":
+		return env
+	default:
+		return a.OS + " " + env
+	}
+}
 
 // ActiveOps reports how many jobs are currently executing.
 func (a *Agent) ActiveOps() int32 { return atomic.LoadInt32(&a.activeOps) }

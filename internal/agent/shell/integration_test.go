@@ -107,3 +107,91 @@ func TestShellEndToEnd(t *testing.T) {
 		t.Fatalf("unexpected exec output: %q", er.Output)
 	}
 }
+
+// fakeWinShell emulates a Windows reverse shell whose interpreter is PowerShell
+// (psHost) or cmd.exe, answering the OS and interpreter probes.
+func fakeWinShell(t *testing.T, addr string, psHost bool) {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Errorf("dial: %v", err)
+		return
+	}
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	out := func(s string) { _, _ = conn.Write([]byte(s)) }
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if strings.HasPrefix(line, "echo __C2AGENT_") {
+			out(strings.TrimPrefix(line, "echo ") + "\n")
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "uname"):
+			// `uname` is not a Windows command -> no output.
+		case strings.Contains(line, "[Environment]::OSVersion"):
+			out("Microsoft Windows NT 10.0.19045.0\n")
+		case line == "hostname":
+			out("WIN-HOST\n")
+		case strings.HasPrefix(line, "Write-Output"):
+			if psHost {
+				out(strings.TrimPrefix(line, "Write-Output ") + "\n")
+			}
+		case line == "ver":
+			if !psHost {
+				out("Microsoft Windows [Version 10.0.19045.0]\n")
+			}
+		}
+	}
+}
+
+func TestShellWindowsEnvProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		psHost  bool
+		wantEnv string
+	}{
+		{"powershell", true, EnvPowerShell},
+		{"cmd", false, EnvCmd},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := agent.NewRegistry()
+			srv := NewServer(ServerOptions{
+				Registry:      reg,
+				Host:          "127.0.0.1",
+				Port:          0,
+				BotPrefix:     "BOT-",
+				CmdTimeout:    5 * time.Second,
+				TimeoutAction: "disconnect",
+				QueueCapacity: 16,
+			})
+			if err := srv.Start(); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			defer srv.Close()
+			go fakeWinShell(t, srv.Addr().String(), tc.psHost)
+
+			var ag *agent.Agent
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if ag = reg.Get("BOT-001"); ag != nil {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if ag == nil {
+				t.Fatal("shell bot was not registered")
+			}
+			if ag.OS != "Windows" || ag.Env != tc.wantEnv {
+				t.Fatalf("os=%q env=%q, want Windows/%s", ag.OS, ag.Env, tc.wantEnv)
+			}
+			if ag.SystemName() != "Windows "+tc.wantEnv {
+				t.Fatalf("SystemName() = %q, want %q", ag.SystemName(), "Windows "+tc.wantEnv)
+			}
+		})
+	}
+}

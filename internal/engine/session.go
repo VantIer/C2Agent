@@ -185,7 +185,7 @@ func (e *Engine) runConversation(s *Session) {
 		return
 	}
 
-	system := e.RenderSystemPrompt(ag.OS)
+	system := e.RenderSystemPrompt(ag.SystemName())
 	round := 0
 
 	for round < e.cfg.Policy.RoundLimit {

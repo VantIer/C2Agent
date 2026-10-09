@@ -444,7 +444,7 @@ async function loadAgents() {
             item.className = 'agent-item' + (a.id === data.active ? ' active' : '');
             const id = document.createElement('div'); id.className = 'aid'; id.textContent = a.id;
             const host = document.createElement('div'); host.className = 'host'; host.textContent = a.hostname || '-';
-            const os = document.createElement('div'); os.className = 'os'; os.textContent = (a.kind || '') + ' · ' + (a.os || '');
+            const os = document.createElement('div'); os.className = 'os'; os.textContent = (a.kind || '') + ' · ' + (a.system_name || a.os || '');
             item.append(id, host, os);
             item.onclick = () => { if (a.id !== lastActiveId) switchAgent(a.id); };
             list.appendChild(item);

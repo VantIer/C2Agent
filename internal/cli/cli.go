@@ -159,7 +159,7 @@ func (c *CLI) listAgents() {
 		if a.ID == active {
 			mark = "*"
 		}
-		fmt.Printf(" %s %-20s %-8s %-6s %s\n", mark, a.ID, a.OS, a.Kind, a.Hostname)
+		fmt.Printf(" %s %-20s %-20s %-6s %s\n", mark, a.ID, a.SystemName(), a.Kind, a.Hostname)
 	}
 }
 

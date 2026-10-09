@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestExtractWrappedEdit(t *testing.T) {
@@ -41,38 +42,137 @@ func TestApplyStringEditOverlappingIsAmbiguous(t *testing.T) {
 }
 
 func TestStreamingCommandBuilders(t *testing.T) {
-	size, err := fileSizeCmd("Linux", "/tmp/f")
+	linux := target{os: "Linux", env: EnvBash}
+	size, err := fileSizeCmd(linux, "/tmp/f")
 	if err != nil || size != "wc -c < '/tmp/f'" {
 		t.Fatalf("fileSizeCmd = %q, %v", size, err)
 	}
-	rc, err := readChunkCmd("Linux", "/tmp/f", 32768, 4096)
+	rc, err := readChunkCmd(linux, "/tmp/f", 32768, 4096)
 	if err != nil || rc != "tail -c +32769 '/tmp/f' | head -c 4096 | base64" {
 		t.Fatalf("readChunkCmd = %q, %v", rc, err)
 	}
-	ac, err := appendBase64Cmd("Linux", "/tmp/f", "AAAA")
+	ac, err := appendBase64Cmd(linux, "/tmp/f", "AAAA")
 	if err != nil || ac != "printf '%s' 'AAAA' | base64 -d >> '/tmp/f'" {
 		t.Fatalf("appendBase64Cmd = %q, %v", ac, err)
 	}
-	tc, err := truncateCreateCmd("Linux", "/tmp/f")
+	tc, err := truncateCreateCmd(linux, "/tmp/f")
 	if err != nil || tc != "mkdir -p \"$(dirname '/tmp/f')\"; : > '/tmp/f'" {
 		t.Fatalf("truncateCreateCmd = %q, %v", tc, err)
 	}
 }
 
-func TestWindowsRangeReadUsesLazyReadLines(t *testing.T) {
-	cmd := windowsRangeBase64Cmd("C:\\f.txt", 10, 20)
-	if !strings.Contains(cmd, "[IO.File]::ReadLines(") || !strings.Contains(cmd, "$i -ge 10") {
-		t.Fatalf("windowsRangeBase64Cmd does not use lazy ReadLines: %q", cmd)
+// A PowerShell host runs the script directly (no launcher, so '$' is evaluated
+// exactly once); a cmd host receives it base64-encoded via -EncodedCommand so
+// cmd.exe quoting and PowerShell expansion cannot corrupt it.
+func TestWindowsEnvWrappers(t *testing.T) {
+	ps := target{os: "Windows", env: EnvPowerShell}
+	cmd, err := readFileCmd(ps, `C:\a$b.txt`, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cmd, "[IO.File]::OpenRead(") {
+		t.Fatalf("PowerShell read command missing OpenRead: %q", cmd)
+	}
+	if strings.HasPrefix(cmd, "powershell ") {
+		t.Fatalf("PowerShell host must not spawn a child launcher: %q", cmd)
+	}
+
+	cmdT := target{os: "Windows", env: EnvCmd}
+	encCmd, err := readFileCmd(cmdT, `C:\a$b.txt`, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const prefix = "powershell -NoProfile -EncodedCommand "
+	if !strings.HasPrefix(encCmd, prefix) {
+		t.Fatalf("cmd host must use -EncodedCommand: %q", encCmd)
+	}
+	u16, derr := base64.StdEncoding.DecodeString(strings.TrimPrefix(encCmd, prefix))
+	if derr != nil {
+		t.Fatalf("encoded command is not valid base64: %v", derr)
+	}
+	script := decodeUTF16LE(t, u16)
+	if !strings.Contains(script, "[IO.File]::OpenRead(") {
+		t.Fatalf("decoded script missing OpenRead: %q", script)
+	}
+	// A literal '$' stays inside a single-quoted PowerShell string, so cmd and
+	// PowerShell hosts both keep it verbatim.
+	if !strings.Contains(script, "'C:\\a$b.txt'") {
+		t.Fatalf("path with '$' not single-quoted: %q", script)
+	}
+}
+
+// sliceLines must preserve original line terminators (unlike a ReadLines +
+// AppendLine round trip, which rewrites LF files to CRLF).
+func TestSliceLinesPreservesTerminators(t *testing.T) {
+	if got := sliceLines("a\nb\nc", "2", "0"); got != "b\nc" {
+		t.Fatalf("LF range = %q, want %q", got, "b\nc")
+	}
+	if got := sliceLines("a\r\nb\r\nc\r\n", "1", "2"); got != "a\r\nb\r\n" {
+		t.Fatalf("CRLF range = %q, want %q", got, "a\r\nb\r\n")
+	}
+	if got := sliceLines("a\nb\nc\n", "2", "3"); got != "b\nc\n" {
+		t.Fatalf("full range = %q, want %q", got, "b\nc\n")
+	}
+	if got := sliceLines("only", "2", "0"); !strings.HasPrefix(got, "Start line 2 exceeds") {
+		t.Fatalf("out-of-range should report an error, got %q", got)
+	}
+}
+
+func decodeUTF16LE(t *testing.T, b []byte) string {
+	t.Helper()
+	if len(b)%2 != 0 {
+		t.Fatalf("odd UTF-16LE byte length: %d", len(b))
+	}
+	u := make([]uint16, len(b)/2)
+	for i := range u {
+		u[i] = uint16(b[2*i]) | uint16(b[2*i+1])<<8
+	}
+	return string(utf16.Decode(u))
+}
+
+func TestFormatListingWindows(t *testing.T) {
+	header := "PSIsContainer Length Name\n------------- ------ ----"
+	if got := formatListing(header); got != "Empty directory" {
+		t.Fatalf("header-only Windows listing = %q, want %q", got, "Empty directory")
+	}
+	table := header + "\n        False   12 a.txt\n         True        docs"
+	got := formatListing(table)
+	if !strings.Contains(got, "FILE 12 a.txt") || !strings.Contains(got, "DIR 0 docs") {
+		t.Fatalf("Windows listing = %q", got)
+	}
+}
+
+func TestDeleteCmdKindEnforced(t *testing.T) {
+	linux := target{os: "Linux", env: EnvBash}
+	if c, _ := deleteCmd(linux, "/tmp/d", false); !strings.Contains(c, "-d '/tmp/d'") || !strings.Contains(c, "rm -f '/tmp/d'") {
+		t.Fatalf("delete_file command = %q", c)
+	}
+	if c, _ := deleteCmd(linux, "/tmp/f", true); !strings.Contains(c, "-f '/tmp/f'") || !strings.Contains(c, "rm -rf '/tmp/f'") {
+		t.Fatalf("delete_dir command = %q", c)
+	}
+	win := target{os: "Windows", env: EnvCmd}
+	c, _ := deleteCmd(win, `C:\x`, false)
+	const prefix = "powershell -NoProfile -EncodedCommand "
+	if !strings.HasPrefix(c, prefix) {
+		t.Fatalf("windows delete_file command not encoded: %q", c)
+	}
+	u16, derr := base64.StdEncoding.DecodeString(strings.TrimPrefix(c, prefix))
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	if !strings.Contains(decodeUTF16LE(t, u16), "PathType Container") {
+		t.Fatalf("windows delete_file missing kind check: %q", decodeUTF16LE(t, u16))
 	}
 }
 
 func TestRenameCmdRejectsPathSeparators(t *testing.T) {
+	linux := target{os: "Linux", env: EnvBash}
 	for _, name := range []string{"", "a/b", `a\b`, "../x"} {
-		if _, err := renameCmd("Linux", "/tmp/x", name); err == nil {
+		if _, err := renameCmd(linux, "/tmp/x", name); err == nil {
 			t.Fatalf("renameCmd accepted unsafe new_name %q", name)
 		}
 	}
-	if _, err := renameCmd("Linux", "/tmp/x", "y"); err != nil {
+	if _, err := renameCmd(linux, "/tmp/x", "y"); err != nil {
 		t.Fatalf("renameCmd rejected a valid name: %v", err)
 	}
 }

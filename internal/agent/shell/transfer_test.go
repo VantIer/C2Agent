@@ -66,7 +66,7 @@ var (
 	reToken    = regexp.MustCompile(`__C2EDIT_[BEM]_[0-9a-f]+__`)
 	reCreate   = regexp.MustCompile(`^mkdir -p "\$\(dirname '([^']*)'\)"; : > '([^']*)'$`)
 	reAppend   = regexp.MustCompile(`^printf '%s' '([^']*)' \| base64 -d >> '([^']*)'$`)
-	reWrite    = regexp.MustCompile(`^printf '%s' '([^']*)' \| base64 -d > '([^']*)'$`)
+	reWrite    = regexp.MustCompile(`^(?:mkdir -p "\$\(dirname '[^']*'\)"; )?printf '%s' '([^']*)' \| base64 -d > '([^']*)'$`)
 	reMV       = regexp.MustCompile(`^mv '([^']*)' '([^']*)'$`)
 	reRM       = regexp.MustCompile(`^rm -f '([^']*)'$`)
 )
@@ -195,22 +195,23 @@ func startShellBot(t *testing.T, fs *memFS) *agent.Registry {
 }
 
 func TestFakeShellCommandRegexes(t *testing.T) {
-	if c, _ := truncateCreateCmd("Linux", "/tmp/x.tmp"); !reCreate.MatchString(c) {
+	linux := target{os: "Linux", env: EnvBash}
+	if c, _ := truncateCreateCmd(linux, "/tmp/x.tmp"); !reCreate.MatchString(c) {
 		t.Fatalf("create regexp: %q", c)
 	}
-	if c, _ := appendBase64Cmd("Linux", "/tmp/x.tmp", "AAAA"); !reAppend.MatchString(c) {
+	if c, _ := appendBase64Cmd(linux, "/tmp/x.tmp", "AAAA"); !reAppend.MatchString(c) {
 		t.Fatalf("append regexp: %q", c)
 	}
-	if c, _ := writeBase64Cmd("Linux", "/tmp/x.tmp", "AAAA"); !reWrite.MatchString(c) {
+	if c, _ := writeBase64Cmd(linux, "/tmp/x.tmp", "AAAA"); !reWrite.MatchString(c) {
 		t.Fatalf("write regexp: %q", c)
 	}
-	if c, _ := renameCmd("Linux", "/tmp/x.tmp", "x"); !reMV.MatchString(c) {
+	if c, _ := renameCmd(linux, "/tmp/x.tmp", "x"); !reMV.MatchString(c) {
 		t.Fatalf("mv regexp: %q", c)
 	}
-	if c, _ := fileSizeCmd("Linux", "/tmp/x"); !reSize.MatchString(c) {
+	if c, _ := fileSizeCmd(linux, "/tmp/x"); !reSize.MatchString(c) {
 		t.Fatalf("size regexp: %q", c)
 	}
-	if c, _ := readChunkCmd("Linux", "/tmp/x", 0, 4); !reTail.MatchString(c) {
+	if c, _ := readChunkCmd(linux, "/tmp/x", 0, 4); !reTail.MatchString(c) {
 		t.Fatalf("tail regexp: %q", c)
 	}
 }

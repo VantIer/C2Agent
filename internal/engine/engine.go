@@ -365,12 +365,14 @@ func (e *Engine) RequiresAuth(action string) bool {
 	return command.RequiresAuth(e.AuthMode(), action)
 }
 
-// RenderSystemPrompt fills {system_name} with the target OS.
-func (e *Engine) RenderSystemPrompt(osName string) string {
-	if osName == "" {
-		osName = "Unknown"
+// RenderSystemPrompt fills {system_name} with the target's system name, which
+// for shell bots is "OS Env" (e.g. "Windows PowerShell") and for native agents
+// is just the OS.
+func (e *Engine) RenderSystemPrompt(systemName string) string {
+	if systemName == "" {
+		systemName = "Unknown"
 	}
-	return strings.ReplaceAll(e.cfg.LLM.SystemPrompt, "{system_name}", osName)
+	return strings.ReplaceAll(e.cfg.LLM.SystemPrompt, "{system_name}", systemName)
 }
 
 // GetTranscript returns the display transcript of a session.
