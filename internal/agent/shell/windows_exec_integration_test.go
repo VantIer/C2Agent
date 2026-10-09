@@ -53,27 +53,37 @@ func TestGeneratedWindowsCommandsExecute(t *testing.T) {
 		{os: "Windows", env: EnvCmd},
 	} {
 		t.Run(tgt.env, func(t *testing.T) {
-			// Whole-file read (base64) then decode.
+			// Whole-file read (sentinel-framed base64) then extract.
 			readCmd, err := readFileCmd(tgt, path, "", "")
 			if err != nil {
 				t.Fatal(err)
 			}
-			gotB64 := runOnHost(t, tgt, readCmd)
-			got, derr := base64.StdEncoding.DecodeString(gotB64)
-			if derr != nil {
-				t.Fatalf("read output is not base64 (%q): %v", gotB64, derr)
-			}
-			if string(got) != string(want) {
-				t.Fatalf("read mismatch: got %q want %q", got, want)
+			gotContent, readErr := extractWrappedEdit(runOnHost(t, tgt, readCmd), winReadBegin, winReadEnd, winReadMissing)
+			if readErr != "" || gotContent != string(want) {
+				t.Fatalf("read mismatch: err=%q got=%q want=%q", readErr, gotContent, want)
 			}
 
-			// file size.
+			// file size (sentinel-framed).
 			sizeCmd, err := fileSizeCmd(tgt, path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if s := runOnHost(t, tgt, sizeCmd); s != "18" {
-				t.Fatalf("fileSize = %q, want 18", s)
+			if s, sperr := extractWrappedText(runOnHost(t, tgt, sizeCmd), winSizeBegin, winSizeEnd, winSizeMissing); sperr != "" || s != "18" {
+				t.Fatalf("fileSize = %q (err=%q), want 18", s, sperr)
+			}
+
+			// read chunk (sentinel-framed base64) at an offset.
+			chunkCmd, err := readChunkCmd(tgt, path, 6, 5) // skip "line1\n"
+			if err != nil {
+				t.Fatal(err)
+			}
+			chunkPayload, cerr := extractWrappedText(runOnHost(t, tgt, chunkCmd), winChunkBegin, winChunkEnd, winChunkMissing)
+			if cerr != "" {
+				t.Fatalf("chunk read frame error: %v", cerr)
+			}
+			chunkData, derr := base64.StdEncoding.DecodeString(chunkPayload)
+			if derr != nil || string(chunkData) != "line2" {
+				t.Fatalf("chunk read = %q (%v), want %q", chunkData, derr, "line2")
 			}
 
 			// write_file round trip (content with spaces/newlines).
@@ -126,8 +136,8 @@ func TestGeneratedWindowsCommandsExecute(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if out := strings.TrimSpace(runOnHost(t, tgt, sizeMiss)); !strings.HasPrefix(out, "Error") {
-				t.Fatalf("fileSize on a missing path = %q, want an Error", out)
+			if _, sperr := extractWrappedText(runOnHost(t, tgt, sizeMiss), winSizeBegin, winSizeEnd, winSizeMissing); sperr == "" {
+				t.Fatalf("fileSize on a missing path did not report an error")
 			}
 
 			// rename over an existing destination must overwrite it (upload and

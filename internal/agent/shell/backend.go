@@ -275,11 +275,11 @@ func (b *Backend) Execute(ctx context.Context, action string, params map[string]
 		out = formatListing(out)
 	case "read_file":
 		if b.isWindows() {
-			data, ok := decodeBase64(out)
-			if !ok {
-				return "Error: read failed: " + strings.TrimSpace(out), nil
+			content, perr := extractWrappedEdit(out, winReadBegin, winReadEnd, winReadMissing)
+			if perr != "" {
+				return "Error: read failed: " + perr, nil
 			}
-			out = string(data)
+			out = content
 		}
 		if isWholeFileRead(params) {
 			// Match the native agents: whole-file reads are capped at 51200 chars.
@@ -371,22 +371,13 @@ func (b *Backend) Upload(ctx context.Context, localPath, destPath string) (strin
 // is bounded regardless of file size; the local file is written to a temporary
 // path and renamed into place after the size is verified.
 func (b *Backend) Download(ctx context.Context, srcPath, destDir string) (string, error) {
-	sizeCmd, err := fileSizeCmd(b.target(), srcPath)
-	if err != nil {
-		return "", agent.NewNetworkError("%v", err)
-	}
-	out, err := b.request(ctx, sizeCmd)
+	size, msg, err := b.remoteFileSize(ctx, srcPath)
 	if err != nil {
 		return "", err
 	}
-	size, perr := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
-	if perr != nil {
+	if msg != "" {
 		// A non-numeric size is a business failure (missing/unreadable source),
 		// not a transport error; report it without classifying it as network.
-		msg := strings.TrimSpace(out)
-		if msg == "" {
-			msg = "cannot stat source"
-		}
 		return "", fmt.Errorf("download %s: %s", srcPath, msg)
 	}
 	if size < 0 {
@@ -427,7 +418,16 @@ func (b *Backend) Download(ctx context.Context, srcPath, destDir string) (string
 			cleanup()
 			return "", rerr
 		}
-		data, ok := decodeBase64(chunkOut)
+		payload := chunkOut
+		if b.isWindows() {
+			p, perr := extractWrappedText(chunkOut, winChunkBegin, winChunkEnd, winChunkMissing)
+			if perr != "" {
+				cleanup()
+				return "", agent.NewNetworkError("download: bad chunk at offset %d", read)
+			}
+			payload = p
+		}
+		data, ok := decodeBase64(payload)
 		if !ok || int64(len(data)) != n {
 			cleanup()
 			return "", agent.NewNetworkError("download: bad chunk at offset %d", read)
@@ -449,18 +449,42 @@ func (b *Backend) Download(ctx context.Context, srcPath, destDir string) (string
 	return dest, nil
 }
 
-// verifyRemoteSize reports whether the remote file now has exactly want bytes.
-func (b *Backend) verifyRemoteSize(ctx context.Context, path string, want int64) bool {
+// remoteFileSize runs the size command and parses the reply. On Windows the
+// reply is sentinel-framed, so only the payload between the sentinels is
+// parsed and surrounding stream noise (e.g. a PowerShell CLIXML block on a
+// merged stderr) is ignored. It returns the size, a business-error message
+// ("" on success), and a transport error.
+func (b *Backend) remoteFileSize(ctx context.Context, path string) (int64, string, error) {
 	sizeCmd, err := fileSizeCmd(b.target(), path)
 	if err != nil {
-		return false
+		return 0, "", agent.NewNetworkError("%v", err)
 	}
 	out, err := b.request(ctx, sizeCmd)
 	if err != nil {
-		return false
+		return 0, "", err
 	}
-	got, perr := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
-	return perr == nil && got == want
+	text := strings.TrimSpace(out)
+	if b.isWindows() {
+		payload, perr := extractWrappedText(out, winSizeBegin, winSizeEnd, winSizeMissing)
+		if perr != "" {
+			return 0, perr, nil
+		}
+		text = payload
+	}
+	size, perr := strconv.ParseInt(text, 10, 64)
+	if perr != nil {
+		if text == "" {
+			text = "cannot stat source"
+		}
+		return 0, text, nil
+	}
+	return size, "", nil
+}
+
+// verifyRemoteSize reports whether the remote file now has exactly want bytes.
+func (b *Backend) verifyRemoteSize(ctx context.Context, path string, want int64) bool {
+	size, msg, err := b.remoteFileSize(ctx, path)
+	return err == nil && msg == "" && size == want
 }
 
 // removeRemote best-effort deletes a remote temporary file.
@@ -555,11 +579,9 @@ func (b *Backend) editFile(ctx context.Context, params map[string]any) (string, 
 	return "Successfully edited file: " + path, nil
 }
 
-// extractWrappedEdit pulls the base64 payload out of a sentinel-wrapped read,
-// returning the decoded content and an error message ("" on success). Because
-// the payload is framed and verified by base64 decoding, file content that
-// happens to look like an error message is never misread as a read failure.
-func extractWrappedEdit(out, begin, end, missing string) (string, string) {
+// extractWrappedText returns the payload framed by begin/end, ignoring any
+// surrounding stream noise. A lone `missing` line is reported as an error.
+func extractWrappedText(out, begin, end, missing string) (string, string) {
 	lines := strings.Split(out, "\n")
 	for _, l := range lines {
 		if strings.TrimSpace(l) == missing {
@@ -586,7 +608,19 @@ func extractWrappedEdit(out, begin, end, missing string) (string, string) {
 	if ei < 0 {
 		return "", "unexpected response while reading file"
 	}
-	data, ok := decodeBase64(strings.Join(lines[bi+1:ei], ""))
+	return strings.TrimSpace(strings.Join(lines[bi+1:ei], "\n")), ""
+}
+
+// extractWrappedEdit pulls the base64 payload out of a sentinel-wrapped read,
+// returning the decoded content and an error message ("" on success). Because
+// the payload is framed and verified by base64 decoding, file content that
+// happens to look like an error message is never misread as a read failure.
+func extractWrappedEdit(out, begin, end, missing string) (string, string) {
+	payload, perr := extractWrappedText(out, begin, end, missing)
+	if perr != "" {
+		return "", perr
+	}
+	data, ok := decodeBase64(payload)
 	if !ok {
 		return "", "could not decode file content"
 	}

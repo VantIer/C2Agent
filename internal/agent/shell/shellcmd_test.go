@@ -34,6 +34,47 @@ func TestExtractWrappedEdit(t *testing.T) {
 	}
 }
 
+// Windows replies whose payload is parsed strictly are framed by fixed
+// sentinels so a PowerShell CLIXML progress block (emitted on a merged stderr)
+// around the payload cannot corrupt the result.
+func TestExtractWrappedIgnoresStreamNoise(t *testing.T) {
+	noise := "#< CLIXML\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">" +
+		"<Obj S=\"progress\"><AV>Preparing modules for first use.</AV></Obj></Objs>"
+
+	payload := "hello\r\nworld\r\n"
+	readOut := noise + "\n" + winReadBegin + "\n" +
+		base64.StdEncoding.EncodeToString([]byte(payload)) + "\n" + winReadEnd + "\n" + noise
+	if got, errMsg := extractWrappedEdit(readOut, winReadBegin, winReadEnd, winReadMissing); errMsg != "" || got != payload {
+		t.Fatalf("noise-tolerant read: got=%q err=%q", got, errMsg)
+	}
+
+	sizeOut := noise + "\n" + winSizeBegin + "\n18\n" + winSizeEnd + "\n" + noise
+	if s, errMsg := extractWrappedText(sizeOut, winSizeBegin, winSizeEnd, winSizeMissing); errMsg != "" || s != "18" {
+		t.Fatalf("noise-tolerant size: got=%q err=%q", s, errMsg)
+	}
+}
+
+// The Windows read path runs the reply through stripShellResponse before
+// extracting the framed payload; the sentinel lines must survive stripping so a
+// CLIXML block around them cannot break the read.
+func TestStripShellResponseKeepsSentinels(t *testing.T) {
+	marker := "__C2AGENT_abc__"
+	cmd := "powershell -NoProfile -EncodedCommand AAAA 2>NUL"
+	lines := []string{
+		cmd,
+		"#< CLIXML",
+		winReadBegin,
+		base64.StdEncoding.EncodeToString([]byte("hi")),
+		winReadEnd,
+		"<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\"></Objs>",
+		"echo " + marker,
+	}
+	got, errMsg := extractWrappedEdit(stripShellResponse(lines, marker, cmd), winReadBegin, winReadEnd, winReadMissing)
+	if errMsg != "" || got != "hi" {
+		t.Fatalf("strip+extract: got=%q err=%q", got, errMsg)
+	}
+}
+
 func TestApplyStringEditOverlappingIsAmbiguous(t *testing.T) {
 	// "aa" occurs twice (overlapping) in "aaa"; must be rejected.
 	if _, errMsg := applyStringEdit("aaa", "aa", "b"); errMsg == "" {
@@ -86,11 +127,7 @@ func TestWindowsEnvWrappers(t *testing.T) {
 	if !strings.HasPrefix(encCmd, prefix) {
 		t.Fatalf("cmd host must use -EncodedCommand: %q", encCmd)
 	}
-	u16, derr := base64.StdEncoding.DecodeString(strings.TrimPrefix(encCmd, prefix))
-	if derr != nil {
-		t.Fatalf("encoded command is not valid base64: %v", derr)
-	}
-	script := decodeUTF16LE(t, u16)
+	script := decodeEncodedCmd(t, encCmd)
 	if !strings.Contains(script, "[IO.File]::OpenRead(") {
 		t.Fatalf("decoded script missing OpenRead: %q", script)
 	}
@@ -99,6 +136,22 @@ func TestWindowsEnvWrappers(t *testing.T) {
 	if !strings.Contains(script, "'C:\\a$b.txt'") {
 		t.Fatalf("path with '$' not single-quoted: %q", script)
 	}
+}
+
+// decodeEncodedCmd decodes the -EncodedCommand payload, tolerating the " 2>NUL"
+// stderr-suppression suffix appended for cmd.exe hosts.
+func decodeEncodedCmd(t *testing.T, cmd string) string {
+	t.Helper()
+	const prefix = "powershell -NoProfile -EncodedCommand "
+	if !strings.HasPrefix(cmd, prefix) {
+		t.Fatalf("not an encoded command: %q", cmd)
+	}
+	s := strings.TrimSuffix(strings.TrimPrefix(cmd, prefix), " 2>NUL")
+	u16, derr := base64.StdEncoding.DecodeString(s)
+	if derr != nil {
+		t.Fatalf("encoded command is not valid base64: %v", derr)
+	}
+	return decodeUTF16LE(t, u16)
 }
 
 // sliceLines must preserve original line terminators (unlike a ReadLines +
@@ -156,7 +209,7 @@ func TestDeleteCmdKindEnforced(t *testing.T) {
 	if !strings.HasPrefix(c, prefix) {
 		t.Fatalf("windows delete_file command not encoded: %q", c)
 	}
-	u16, derr := base64.StdEncoding.DecodeString(strings.TrimPrefix(c, prefix))
+	u16, derr := base64.StdEncoding.DecodeString(strings.TrimSuffix(strings.TrimPrefix(c, prefix), " 2>NUL"))
 	if derr != nil {
 		t.Fatal(derr)
 	}
