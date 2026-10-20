@@ -205,10 +205,20 @@ C2Agent/
 │   │   │   └── backend.go        # forward / control / upload / download
 │   │   └── shell/
 │   │       ├── server.go         # TCP 监听 + OS 探测 + 行读取
-│   │       ├── backend.go        # 单行请求 + marker 定界
-│   │       └── shellcmd.go       # 动作 → shell 命令（按 OS）
+│   │       ├── backend.go        # 请求状态机 + 输出缓冲
+│   │       ├── backend_transfer.go # 上传/下载/大小校验
+│   │       ├── backend_edit.go   # edit_file 流程
+│   │       ├── backend_response.go # 哨兵/base64 响应解析
+│   │       ├── shellcmd.go       # 常量/target/引号/finish
+│   │       ├── shellcmd_powershell.go # PowerShell 脚本构造
+│   │       ├── shellcmd_actions.go # 动作 → shell 命令
+│   │       ├── shellcmd_transfer.go # 分块传输/编辑命令
+│   │       ├── shellcmd_parse.go # 列表/响应/编辑解析
+│   │       └── shellcmd_path.go  # 远端路径与包含检查
 │   ├── command/
 │   │   └── command.go            # 动作用表：名称/参数/风险/安全检查
+│   ├── limits/
+│   │   └── limits.go             # 输出上限/截断标记/行范围公共常量
 │   ├── llm/
 │   │   └── client.go             # OpenAI 兼容客户端（stream+tools，含 tools schema 生成）
 │   ├── engine/
@@ -218,7 +228,11 @@ C2Agent/
 │   ├── fileserver/
 │   │   └── fileserver.go         # 可选静态文件服务器（目录列表/Range 下载/防穿越）
 │   ├── web/
-│   │   ├── server.go             # net/http 路由 + SSE + 文件 API
+│   │   ├── server.go             # 路由 + 配置/JSON 辅助
+│   │   ├── middleware.go         # origin guard
+│   │   ├── handlers_agent.go     # Agent/配置/直连命令
+│   │   ├── handlers_session.go   # 会话/SSE/授权
+│   │   ├── handlers_files.go     # 文件管理 API
 │   │   └── ui/                   # go:embed 内嵌前端静态资源
 │   │       └── index.html
 │   └── cli/

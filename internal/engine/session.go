@@ -246,142 +246,175 @@ func (e *Engine) runConversation(s *Session) {
 		}
 		e.publishNow(s, Event{"type": "response_done", "iteration": round, "commands": toolCallsJSON(res.ToolCalls)})
 
-		denied := false
-		for i, tc := range res.ToolCalls {
-			if s.isStopped() {
-				for _, rest := range res.ToolCalls[i:] {
-					e.appendToolRaw(s, rest.ID, "Error: aborted before execution")
-				}
+		switch e.runToolCalls(s, res, &round) {
+		case toolContinue:
+			// Run the next LLM round.
+		case toolStop, toolDenied, toolFatal:
+			return
+		}
+	}
+}
+
+// toolOutcome tells runConversation how a batch of tool calls ended.
+type toolOutcome int
+
+const (
+	toolContinue toolOutcome = iota // all calls processed; start the next round
+	toolStop                        // session stopped/cancelled
+	toolDenied                      // user denied an action; end the turn
+	toolFatal                       // agent/transport failure; end the turn
+)
+
+// runToolCalls executes the tool calls of one assistant turn. Authorization
+// approval resets *round so the caller's loop budget is renewed.
+func (e *Engine) runToolCalls(s *Session, res *llm.ChatResult, round *int) toolOutcome {
+	for i, tc := range res.ToolCalls {
+		if s.isStopped() {
+			e.abortRemaining(s, res.ToolCalls[i:], "Error: aborted before execution")
+			e.markStopped(s)
+			return toolStop
+		}
+
+		action := tc.Name
+		params, perr := parseArgs(tc.Arguments)
+		if perr != nil {
+			e.recordToolError(s, tc, action, params, "Error: invalid arguments: "+perr.Error())
+			continue
+		}
+		command.ClampReadFileRange(action, params)
+		if _, known := command.SpecByName(action); !known {
+			e.recordToolError(s, tc, action, params, "Error: unknown action: "+action)
+			continue
+		}
+		if !command.CheckSafety(action, params) {
+			e.recordToolError(s, tc, action, params, "Error: blocked by safety check")
+			continue
+		}
+
+		if e.RequiresAuth(action) {
+			ok, stopped := e.authorizeTool(s, tc, action, params)
+			if stopped {
+				e.abortRemaining(s, res.ToolCalls[i:], "Error: aborted before execution")
 				e.markStopped(s)
-				return
+				return toolStop
 			}
-			action := tc.Name
-			params, perr := parseArgs(tc.Arguments)
-			if perr != nil {
-				msg := "Error: invalid arguments: " + perr.Error()
-				seq := e.appendTool(s, tc.ID, action, params, msg)
-				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
-				continue
+			if !ok {
+				e.denyTool(s, res.ToolCalls[i+1:], tc.ID, action, params)
+				return toolDenied
 			}
-			command.ClampReadFileRange(action, params)
-			if _, known := command.SpecByName(action); !known {
-				msg := "Error: unknown action: " + action
-				seq := e.appendTool(s, tc.ID, action, params, msg)
-				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
-				continue
-			}
-			if !command.CheckSafety(action, params) {
-				msg := "Error: blocked by safety check"
-				seq := e.appendTool(s, tc.ID, action, params, msg)
-				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
-				continue
-			}
-
-			if e.RequiresAuth(action) {
-				// Register the decision channel BEFORE announcing the request so
-				// a fast client cannot submit a decision that is then lost.
-				authCh := make(chan bool, 1)
-				s.mu.Lock()
-				s.pending = &PendingCommand{ToolCallID: tc.ID, Action: action, Params: params}
-				s.phase = PhaseAuthWait
-				s.authCh = authCh
-				s.mu.Unlock()
-				e.publishNow(s, Event{"type": "auth_required", "action": action, "params": params})
-				ok := e.awaitAuth(s, authCh)
-				s.mu.Lock()
-				s.pending = nil
-				if s.authCh == authCh {
-					s.authCh = nil
-				}
-				s.mu.Unlock()
-				if s.isStopped() {
-					for _, rest := range res.ToolCalls[i:] {
-						e.appendToolRaw(s, rest.ID, "Error: aborted before execution")
-					}
-					e.markStopped(s)
-					return
-				}
-				if !ok {
-					// Denied: the action is NEVER enqueued on the agent. Feed the
-					// denial back as the tool result (for the model's context),
-					// mark the transcript explicitly, and END the turn so the
-					// model cannot immediately work around the denial.
-					const deniedMsg = "Error: user denied command execution (not executed)"
-					e.appendToolRaw(s, tc.ID, deniedMsg)
-					seq := s.addTranscript("system", "Denied: "+action+" (not executed)")
-					for _, rest := range res.ToolCalls[i+1:] {
-						e.appendToolRaw(s, rest.ID, "Error: skipped because a previous command was denied")
-					}
-					e.publish(s, seq, Event{"type": "execution_denied", "action": action, "params": params})
-					denied = true
-					break
-				}
-				round = 0
-			}
-
-			s.mu.Lock()
-			s.phase = PhaseExec
-			s.mu.Unlock()
-			e.publishNow(s, Event{"type": "executing", "action": action, "params": params})
-
-			// Re-resolve the agent before each action: a reconnect replaces the
-			// registry entry, and the Agent captured at turn start would be the
-			// closed predecessor.
-			ag = e.registry.Get(s.AgentID)
-			if ag == nil {
-				msg := "Error: agent offline"
-				seq := e.appendTool(s, tc.ID, action, params, msg)
-				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
-				continue
-			}
-
-			job := agent.NewJob(agent.JobAction)
-			job.Action = action
-			job.Params = params
-			if err := ag.Enqueue(job); err != nil {
-				msg := "Error: agent offline"
-				seq := e.appendTool(s, tc.ID, action, params, msg)
-				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
-				continue
-			}
-			s.mu.Lock()
-			s.job = job
-			s.mu.Unlock()
-			var r agent.JobResult
-			r.Output, r.Err = waitJob(ag, job)
-			s.mu.Lock()
-			s.job = nil
-			s.mu.Unlock()
-
-			if r.Err != nil {
-				if r.Err == agent.ErrCancelled {
-					// The user stopped the session (or the job was cancelled):
-					// report it as a stop, not as an execution failure.
-					e.publishNow(s, Event{"type": "stopped"})
-					return
-				}
-				if r.Err == agent.ErrClosed {
-					msg := "Error: agent offline"
-					seq := e.appendTool(s, tc.ID, action, params, msg)
-					e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
-					continue
-				}
-				// Persist the failure as this tool call's result so history
-				// replay matches the live view, and answer the remaining tool
-				// calls so the assistant/tool message sequence stays valid.
-				seq := e.appendTool(s, tc.ID, action, params, "Error: "+r.Err.Error())
-				for _, rest := range res.ToolCalls[i+1:] {
-					e.appendToolRaw(s, rest.ID, "Error: skipped because the agent connection failed")
-				}
-				e.publish(s, seq, Event{"type": "execution_error", "action": action, "params": params, "error": r.Err.Error()})
-				return
-			}
-			seq := e.appendTool(s, tc.ID, action, params, r.Output)
-			e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": r.Output})
+			*round = 0
 		}
-		if denied {
-			break
+
+		if outcome := e.executeToolCall(s, tc, action, params, res.ToolCalls[i+1:]); outcome != toolContinue {
+			return outcome
 		}
+	}
+	return toolContinue
+}
+
+// recordToolError persists a non-executed tool result (bad arguments, unknown
+// action, or safety rejection) and emits its completion event.
+func (e *Engine) recordToolError(s *Session, tc llm.ToolCall, action string, params map[string]any, msg string) {
+	seq := e.appendTool(s, tc.ID, action, params, msg)
+	e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
+}
+
+// authorizeTool waits for the operator's decision. It returns stopped when the
+// session ended while waiting; otherwise ok is the decision.
+func (e *Engine) authorizeTool(s *Session, tc llm.ToolCall, action string, params map[string]any) (ok bool, stopped bool) {
+	// Register the decision channel BEFORE announcing the request so a fast
+	// client cannot submit a decision that is then lost.
+	authCh := make(chan bool, 1)
+	s.mu.Lock()
+	s.pending = &PendingCommand{ToolCallID: tc.ID, Action: action, Params: params}
+	s.phase = PhaseAuthWait
+	s.authCh = authCh
+	s.mu.Unlock()
+
+	e.publishNow(s, Event{"type": "auth_required", "action": action, "params": params})
+	ok = e.awaitAuth(s, authCh)
+
+	s.mu.Lock()
+	s.pending = nil
+	if s.authCh == authCh {
+		s.authCh = nil
+	}
+	s.mu.Unlock()
+	return ok, s.isStopped()
+}
+
+// denyTool records a denial, skips the remaining tool calls, and ends the turn
+// so the model cannot immediately work around the decision.
+func (e *Engine) denyTool(s *Session, remaining []llm.ToolCall, toolCallID, action string, params map[string]any) {
+	const deniedMsg = "Error: user denied command execution (not executed)"
+	e.appendToolRaw(s, toolCallID, deniedMsg)
+	seq := s.addTranscript("system", "Denied: "+action+" (not executed)")
+	e.abortRemaining(s, remaining, "Error: skipped because a previous command was denied")
+	e.publish(s, seq, Event{"type": "execution_denied", "action": action, "params": params})
+}
+
+// executeToolCall dispatches one approved action and waits for its result.
+func (e *Engine) executeToolCall(s *Session, tc llm.ToolCall, action string, params map[string]any, remaining []llm.ToolCall) toolOutcome {
+	s.mu.Lock()
+	s.phase = PhaseExec
+	s.mu.Unlock()
+	e.publishNow(s, Event{"type": "executing", "action": action, "params": params})
+
+	// Re-resolve the agent before each action: a reconnect replaces the
+	// registry entry, and the Agent captured at turn start would be the
+	// closed predecessor.
+	ag := e.registry.Get(s.AgentID)
+	if ag == nil {
+		e.recordToolError(s, tc, action, params, "Error: agent offline")
+		return toolContinue
+	}
+
+	job := agent.NewJob(agent.JobAction)
+	job.Action = action
+	job.Params = params
+	if err := ag.Enqueue(job); err != nil {
+		e.recordToolError(s, tc, action, params, "Error: agent offline")
+		return toolContinue
+	}
+	s.mu.Lock()
+	s.job = job
+	s.mu.Unlock()
+	var r agent.JobResult
+	r.Output, r.Err = waitJob(ag, job)
+	s.mu.Lock()
+	s.job = nil
+	s.mu.Unlock()
+
+	if r.Err != nil {
+		if r.Err == agent.ErrCancelled {
+			// The user stopped the session (or the job was cancelled): report
+			// it as a stop, not as an execution failure.
+			e.publishNow(s, Event{"type": "stopped"})
+			return toolStop
+		}
+		if r.Err == agent.ErrClosed {
+			e.recordToolError(s, tc, action, params, "Error: agent offline")
+			return toolContinue
+		}
+		// Persist the failure as this tool call's result so history replay
+		// matches the live view, and answer the remaining tool calls so the
+		// assistant/tool message sequence stays valid.
+		seq := e.appendTool(s, tc.ID, action, params, "Error: "+r.Err.Error())
+		e.abortRemaining(s, remaining, "Error: skipped because the agent connection failed")
+		e.publish(s, seq, Event{"type": "execution_error", "action": action, "params": params, "error": r.Err.Error()})
+		return toolFatal
+	}
+
+	seq := e.appendTool(s, tc.ID, action, params, r.Output)
+	e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": r.Output})
+	return toolContinue
+}
+
+// abortRemaining appends the standard aborted-result payload for tools that
+// will not run because the turn ended early.
+func (e *Engine) abortRemaining(s *Session, calls []llm.ToolCall, msg string) {
+	for _, tc := range calls {
+		e.appendToolRaw(s, tc.ID, msg)
 	}
 }
 

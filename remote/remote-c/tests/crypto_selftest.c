@@ -4,14 +4,14 @@
  *   Windows: gcc -O2 -Wall -Wextra -o crypto_selftest tests/crypto_selftest.c -lws2_32
  *   POSIX:   gcc -O2 -Wall -Wextra -o crypto_selftest tests/crypto_selftest.c -lpthread
  *
- * The harness #includes protocol.c so the file-local derive helper is visible.
+ * The harness #includes crypto.c so the file-local derive helper is visible.
  * The expected values are the cross-language interop vectors shared with the Go
  * control end and remote-go/remote-py.
  */
 #include <stdio.h>
 #include <string.h>
 
-#include "../protocol.c"
+#include "../crypto.c"
 
 static int check_hex(const char *label, const uint8_t *got, int len, const char *want) {
     static const char hc[] = "0123456789abcdef";

@@ -1,8 +1,8 @@
 /* Self-test for the C agent's exact-string edit_file semantics.
  *
  * Build (from remote/remote-c):
- *   Windows: gcc -O2 -Wall -Wextra -o edit_selftest tests/edit_selftest.c protocol.c -lws2_32
- *   POSIX:   gcc -O2 -Wall -Wextra -o edit_selftest tests/edit_selftest.c protocol.c -lpthread
+ *   Windows: gcc -O2 -Wall -Wextra -o edit_selftest tests/edit_selftest.c protocol.c crypto.c pathutil.c osutil.c -lws2_32
+ *   POSIX:   gcc -O2 -Wall -Wextra -o edit_selftest tests/edit_selftest.c protocol.c crypto.c pathutil.c osutil.c -lpthread
  */
 #include <stdio.h>
 #include <string.h>

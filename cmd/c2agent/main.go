@@ -34,10 +34,7 @@ func main() {
 		logger.Fatalf("config: %v", err)
 	}
 
-	runMode := *mode
-	if runMode == "" {
-		runMode = cfg.Mode
-	}
+	runMode := resolveMode(*mode, cfg)
 
 	fileSrv := startFileServer(cfg, logger)
 
@@ -131,6 +128,14 @@ func main() {
 	if fileSrv != nil {
 		_ = fileSrv.Close()
 	}
+}
+
+// resolveMode returns the CLI override when supplied, otherwise the config mode.
+func resolveMode(flagMode string, cfg *config.Config) string {
+	if flagMode != "" {
+		return flagMode
+	}
+	return cfg.Mode
 }
 
 // startFileServer prepares and starts the optional file server. Invalid

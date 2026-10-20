@@ -1,4 +1,4 @@
-================================================================================
+﻿================================================================================
  C2Agent C Remote Agent - Compile Instructions
 ================================================================================
 
@@ -9,7 +9,10 @@ library dependencies - only the standard C library + OS socket APIs
 
 Files:
     agent.h        shared declarations / protocol constants
-    protocol.c     packet + TLV codec, wire I/O, small helpers
+    protocol.c     packet + TLV codec, wire I/O
+    crypto.c       SHA-256, ChaCha20, per-connection encryption
+    pathutil.c     path helpers, host info, timing, keepalive
+    osutil.c       platform string conversion, UTF-8 wrappers, string buffers
     actions.c      local file system actions (list/read/write/edit/copy/...)
     exec_cmd.c     cross-platform shell command execution with timeout
     main.c         entry point: config, dialing, register, heartbeat, dispatch
@@ -18,7 +21,7 @@ Files:
  Compiling on Linux (or macOS)
 --------------------------------------------------------------------------------
 
-    gcc -O2 -Wall -Wextra -o c2agent_remote protocol.c actions.c exec_cmd.c main.c -lpthread
+    gcc -O2 -Wall -Wextra -o c2agent_remote protocol.c crypto.c pathutil.c osutil.c actions.c exec_cmd.c main.c -lpthread
 
 Resulting binary: ./c2agent_remote
 
@@ -27,13 +30,13 @@ agent responsive to C2 heartbeats while a long command runs.)
 
 On very old glibc systems clock_gettime may need "-lrt":
 
-    gcc -O2 -Wall -Wextra -o c2agent_remote protocol.c actions.c exec_cmd.c main.c -lpthread -lrt
+    gcc -O2 -Wall -Wextra -o c2agent_remote protocol.c crypto.c pathutil.c osutil.c actions.c exec_cmd.c main.c -lpthread -lrt
 
 --------------------------------------------------------------------------------
  Compiling on Windows (MinGW-w64 gcc)
 --------------------------------------------------------------------------------
 
-    gcc -O2 -Wall -Wextra -o c2agent_remote.exe protocol.c actions.c exec_cmd.c main.c -lws2_32
+    gcc -O2 -Wall -Wextra -o c2agent_remote.exe protocol.c crypto.c pathutil.c osutil.c actions.c exec_cmd.c main.c -lws2_32
 
 Resulting binary: c2agent_remote.exe
 

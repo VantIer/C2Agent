@@ -83,6 +83,7 @@ C2Agent/
 │   │   ├── native/           # 原生协议 server + backend
 │   │   └── shell/            # 反弹 shell server + backend + 命令构造
 │   ├── command/              # 动作表（名称/参数/风险/安全检查/工具 schema 来源）
+│   ├── limits/               # 输出/行范围公共限制
 │   ├── llm/                  # openai-go 客户端 + tools schema
 │   ├── engine/               # 多会话编排、授权、轮数、事件
 │   ├── fileserver/           # 可选静态文件服务器（无鉴权，防路径穿越）
@@ -143,9 +144,9 @@ build\build_all.bat         # Windows
 
 ```bash
 # Linux / macOS（心跳跑在线程上，链接 pthread）
-gcc -O2 -Wall -Wextra -o c2agent_remote remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lpthread
+gcc -O2 -Wall -Wextra -o c2agent_remote remote/remote-c/protocol.c remote/remote-c/crypto.c remote/remote-c/pathutil.c remote/remote-c/osutil.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lpthread
 # Windows (MinGW-w64)
-gcc -O2 -Wall -Wextra -o c2agent_remote.exe remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lws2_32
+gcc -O2 -Wall -Wextra -o c2agent_remote.exe remote/remote-c/protocol.c remote/remote-c/crypto.c remote/remote-c/pathutil.c remote/remote-c/osutil.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lws2_32
 ```
 
 #### 7.4 Python 受控端
@@ -445,9 +446,9 @@ build\build_all.bat         # Windows
 
 ```bash
 # Linux / macOS (heartbeat runs on a thread; link pthread)
-gcc -O2 -Wall -Wextra -o c2agent_remote remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lpthread
+gcc -O2 -Wall -Wextra -o c2agent_remote remote/remote-c/protocol.c remote/remote-c/crypto.c remote/remote-c/pathutil.c remote/remote-c/osutil.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lpthread
 # Windows (MinGW-w64)
-gcc -O2 -Wall -Wextra -o c2agent_remote.exe remote/remote-c/protocol.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lws2_32
+gcc -O2 -Wall -Wextra -o c2agent_remote.exe remote/remote-c/protocol.c remote/remote-c/crypto.c remote/remote-c/pathutil.c remote/remote-c/osutil.c remote/remote-c/actions.c remote/remote-c/exec_cmd.c remote/remote-c/main.c -lws2_32
 ```
 
 #### 7.4 Python agent

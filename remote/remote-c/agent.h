@@ -208,6 +208,9 @@ void     sha256_hex(const void *data, size_t len, char out[65]);
 /* ---------- connection-wide ChaCha20 stream encryption (protocol.c) ----- */
 void     crypto_enable_agent(const char *token, const char *nonce);
 void     crypto_disable(void);
+int      crypto_is_enabled(void);
+void     crypto_encrypt_buf(const uint8_t *in, uint8_t *out, size_t n);
+void     crypto_decrypt_buf(uint8_t *buf, size_t n);
 
 /* growable string buffer */
 typedef struct {

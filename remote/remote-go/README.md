@@ -74,7 +74,11 @@ remote-go/
 ├── main.go         # 入口：配置/参数、拨号、握手、心跳、分发
 ├── protocol.go     # 包头/TLV 编解码、PacketReader、阻塞取包
 ├── crypto.go       # ChaCha20 + EncryptedConn + key 派生
-├── actions.go      # 本地文件动作
+├── actions.go      # 动作分发与简单文件操作
+├── actions_read.go # 读取/行范围
+├── actions_write.go # 写入/编辑
+├── actions_copy.go # 复制/移动/目录遍历
+├── output.go       # 输出上限与截断
 ├── exec.go         # 跨平台 shell 执行（含超时）
 ├── exec_windows.go # Windows 控制台/OEM 代码页→UTF-8 转码
 └── exec_other.go   # 非 Windows：恒等透传
