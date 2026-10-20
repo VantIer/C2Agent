@@ -23,14 +23,19 @@ func runCmd(command string, timeout time.Duration) string {
 	// Kill the whole process tree on timeout/cancel (CommandContext alone only
 	// kills the direct child).
 	cmd.Cancel = func() error { return killTree(cmd) }
-	out, err := cmd.CombinedOutput()
+	var out limitedBuffer
+	out.limit = maxOutputBytes
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Sprintf("Error: Command timed out after %d seconds", int(timeout.Seconds()))
 	}
 	// On Windows the child's pipe output is encoded in the active console/OEM
 	// code page, not UTF-8; decode it before handing the bytes to the C2, whose
 	// JSON encoder would otherwise turn non-ASCII (e.g. Chinese) into U+FFFD.
-	text := strings.TrimRight(string(decodeConsole(out)), "\r\n")
+	text := strings.TrimRight(string(decodeConsole(out.Bytes())), "\r\n")
+	text = capOutput(text, out.truncated)
 	if err != nil && text == "" {
 		return fmt.Sprintf("Error: %v", err)
 	}

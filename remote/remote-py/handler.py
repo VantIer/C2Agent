@@ -37,10 +37,23 @@ from file_transfer import (
     FileTransferError,
     read_one_packet,
 )
+from limits import MAX_OUTPUT_BYTES, OUTPUT_TRUNCATED
 from local_executor import execute as exec_action
 
 
 logger = logging.getLogger(__name__)
+
+
+def _cap_output(text: str) -> str:
+    """Bound an action result to 8 MiB, preserving valid UTF-8."""
+    raw = text.encode("utf-8", "replace")
+    if len(raw) <= MAX_OUTPUT_BYTES:
+        return text
+    limit = MAX_OUTPUT_BYTES - len(OUTPUT_TRUNCATED.encode("utf-8"))
+    raw = raw[: max(0, limit)]
+    while raw and (raw[-1] & 0xC0) == 0x80:
+        raw = raw[:-1]
+    return raw.decode("utf-8", "ignore") + OUTPUT_TRUNCATED
 
 
 class Handler:
@@ -131,6 +144,7 @@ class Handler:
             # and the read loop must keep running or the C2 watchdog could
             # disconnect the agent mid-command.
             result = await asyncio.to_thread(exec_action, name, params, cmd_timeout=self._cmd_timeout)
+            result = _cap_output(result)
             logger.debug(f"exec result req_id={req_id} action={name} -> {result!r}")
             await self._write_packet(writer, encode_response(req_id, cmd, result))
             return

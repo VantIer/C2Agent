@@ -30,6 +30,32 @@ func TestSpecsMatchProtocolActions(t *testing.T) {
 	}
 }
 
+func TestClampReadFileRange(t *testing.T) {
+	params := map[string]any{"start_line": "1", "end_line": "1000"}
+	ClampReadFileRange("read_file", params)
+	if got := params["end_line"]; got != "512" {
+		t.Fatalf("clamped end = %v, want 512", got)
+	}
+
+	params = map[string]any{"start_line": "10"}
+	ClampReadFileRange("read_file", params)
+	if got := params["end_line"]; got != "521" {
+		t.Fatalf("missing end should become 521, got %v", got)
+	}
+
+	params = map[string]any{"start_line": "10", "end_line": "3"}
+	ClampReadFileRange("read_file", params)
+	if got := params["end_line"]; got != "521" {
+		t.Fatalf("reversed range should become 521, got %v", got)
+	}
+
+	params = map[string]any{"start_line": "0", "end_line": "1000"}
+	ClampReadFileRange("read_file", params)
+	if got := params["end_line"]; got != "1000" {
+		t.Fatalf("whole-file read must not be clamped, got %v", got)
+	}
+}
+
 func TestCheckSafety(t *testing.T) {
 	cases := []struct {
 		cmd  string

@@ -115,6 +115,7 @@ func (a *Agent) execJob(j *Job) {
 	}
 
 	out, err := a.dispatch(ctx, j)
+	out = TruncateOutput(out)
 
 	if j.Cancelled() {
 		// A cancelled job reports uniformly as ErrCancelled, whether it was

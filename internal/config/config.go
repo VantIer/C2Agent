@@ -24,12 +24,14 @@ You accomplish tasks exclusively through the provided tools. Rules:
 
 // Config is the root configuration object.
 type Config struct {
-	LLM      LLM      `json:"llm"`
-	Web      Web      `json:"web"`
-	Native   Native   `json:"native"`
-	Shell    Shell    `json:"shell"`
-	Policy   Policy   `json:"policy"`
-	Transfer Transfer `json:"transfer"`
+	Mode       string     `json:"mode"` // startup mode: cli | web
+	LLM        LLM        `json:"llm"`
+	Web        Web        `json:"web"`
+	Native     Native     `json:"native"`
+	Shell      Shell      `json:"shell"`
+	FileServer FileServer `json:"fileserver"`
+	Policy     Policy     `json:"policy"`
+	Transfer   Transfer   `json:"transfer"`
 }
 
 // LLM holds the OpenAI-compatible endpoint settings.
@@ -65,6 +67,15 @@ type Shell struct {
 	BotPrefix  string `json:"bot_prefix"`
 }
 
+// FileServer holds the optional static file server settings. It is completely
+// independent of the C2 listeners and has no authentication.
+type FileServer struct {
+	Enabled    bool   `json:"enable"`
+	ListenHost string `json:"listen_host"`
+	ListenPort int    `json:"listen_port"`
+	Path       string `json:"path"`
+}
+
 // Policy holds authorization / scheduling limits.
 type Policy struct {
 	AuthMode            int    `json:"auth_mode"`              // 0=N-Auto 1=H-Auto 2=F-Auto
@@ -84,6 +95,7 @@ type Transfer struct {
 // Default returns a Config populated with built-in defaults.
 func Default() *Config {
 	return &Config{
+		Mode: "cli",
 		LLM: LLM{
 			APIBase:      "http://localhost:11434/v1",
 			APIKey:       "deepseek",
@@ -106,6 +118,11 @@ func Default() *Config {
 			ListenHost: "0.0.0.0",
 			ListenPort: 8882,
 			BotPrefix:  "BOT-",
+		},
+		FileServer: FileServer{
+			Enabled:    false,
+			ListenHost: "0.0.0.0",
+			ListenPort: 8883,
 		},
 		Policy: Policy{
 			AuthMode:            0,
@@ -143,6 +160,14 @@ func Load(path string) (*Config, error) {
 
 // normalize repairs / validates fields and returns an error on fatal problems.
 func (c *Config) normalize() error {
+	if c.Mode == "" {
+		c.Mode = "cli"
+	}
+	switch c.Mode {
+	case "cli", "web":
+	default:
+		c.Mode = "cli"
+	}
 	if c.Native.ListenHost == "" {
 		c.Native.ListenHost = "0.0.0.0"
 	}
@@ -151,6 +176,12 @@ func (c *Config) normalize() error {
 	}
 	if c.Shell.BotPrefix == "" {
 		c.Shell.BotPrefix = "BOT-"
+	}
+	if c.FileServer.ListenHost == "" {
+		c.FileServer.ListenHost = "0.0.0.0"
+	}
+	if c.FileServer.ListenPort == 0 {
+		c.FileServer.ListenPort = 8883
 	}
 	if c.Web.ListenHost == "" {
 		c.Web.ListenHost = "127.0.0.1"
@@ -214,6 +245,72 @@ func (c *Config) normalize() error {
 		return fmt.Errorf("web and shell listeners share %s:%d", c.Web.ListenHost, c.Web.ListenPort)
 	}
 	return nil
+}
+
+// PrepareFileServer validates the optional file server settings and returns
+// its resolved root. An error means the file server must stay disabled; the
+// rest of the program keeps running.
+func (c *Config) PrepareFileServer() (string, error) {
+	if !c.FileServer.Enabled {
+		return "", nil
+	}
+	if c.FileServer.ListenPort < 1 || c.FileServer.ListenPort > 65535 {
+		return "", fmt.Errorf("fileserver.listen_port out of range: %d", c.FileServer.ListenPort)
+	}
+	if c.Web.ListenPort == c.FileServer.ListenPort &&
+		hostsConflict(c.Web.ListenHost, c.FileServer.ListenHost) {
+		return "", fmt.Errorf("fileserver and web listeners share %s:%d",
+			c.FileServer.ListenHost, c.FileServer.ListenPort)
+	}
+	if c.Native.Enabled && c.Native.ListenPort == c.FileServer.ListenPort &&
+		hostsConflict(c.Native.ListenHost, c.FileServer.ListenHost) {
+		return "", fmt.Errorf("fileserver and native listeners share %s:%d",
+			c.FileServer.ListenHost, c.FileServer.ListenPort)
+	}
+	if c.Shell.Enabled && c.Shell.ListenPort == c.FileServer.ListenPort &&
+		hostsConflict(c.Shell.ListenHost, c.FileServer.ListenHost) {
+		return "", fmt.Errorf("fileserver and shell listeners share %s:%d",
+			c.FileServer.ListenHost, c.FileServer.ListenPort)
+	}
+	return c.ResolveFileServerRoot()
+}
+
+// ResolveFileServerRoot resolves the served directory. An empty path means
+// <executable dir>/fileserver, which is created if needed; an explicit path
+// must already exist and be a directory.
+func (c *Config) ResolveFileServerRoot() (string, error) {
+	p := strings.TrimSpace(c.FileServer.Path)
+	if p == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			return "", fmt.Errorf("fileserver: resolve executable path: %w", err)
+		}
+		if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+			exe = resolved
+		}
+		p = filepath.Join(filepath.Dir(exe), "fileserver")
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			return "", fmt.Errorf("fileserver: create default directory %s: %w", p, err)
+		}
+		return p, nil
+	}
+
+	p = expandUser(p)
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", fmt.Errorf("fileserver: resolve path %q: %w", p, err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("fileserver: path does not exist: %s", abs)
+		}
+		return "", fmt.Errorf("fileserver: stat path %s: %w", abs, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("fileserver: path is not a directory: %s", abs)
+	}
+	return abs, nil
 }
 
 // DlDir returns the download staging directory, creating it if needed.

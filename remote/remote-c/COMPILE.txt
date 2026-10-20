@@ -53,9 +53,9 @@ Example (all CLI args, no config file needed):
                    --reconnect-initial 1 \
                    --reconnect-max 60
 
-Or with a JSON config file (same flat schema as config_remote.json):
+Or with a JSON config file (default: config.json, same flat schema):
 
-    ./c2agent_remote --config config_remote.json
+    ./c2agent_remote --config config.json
 
 CLI arguments override config-file values; config-file values override the
 built-in defaults. Required: c2-address, agent-id, auth-token.

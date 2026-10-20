@@ -10,9 +10,70 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
+
+const (
+	maxOutputBytes      = 8 << 20
+	maxReadFileLines    = 512
+	outputTruncatedText = "\n[... output truncated at 8 MiB]"
+)
+
+// capOutput bounds an action result and appends a clear truncation marker.
+// truncated reports that the producer already discarded bytes (for example a
+// capped command-output writer).
+func capOutput(s string, truncated bool) string {
+	if len(s) <= maxOutputBytes && !truncated {
+		return s
+	}
+	limit := maxOutputBytes - len(outputTruncatedText)
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > len(s) {
+		limit = len(s)
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit] + outputTruncatedText
+}
+
+// limitedBuffer keeps at most limit bytes while accepting (and discarding)
+// everything after the limit, so a child process can never block on a full
+// pipe just because its output is being capped.
+type limitedBuffer struct {
+	mu        sync.Mutex
+	buf       []byte
+	limit     int
+	truncated bool
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.buf) < b.limit {
+		take := b.limit - len(b.buf)
+		if take > len(p) {
+			take = len(p)
+		}
+		b.buf = append(b.buf, p[:take]...)
+		if take < len(p) {
+			b.truncated = true
+		}
+	} else {
+		b.truncated = true
+	}
+	return len(p), nil
+}
+
+func (b *limitedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf
+}
 
 func arg(params []string, i int) string {
 	if i < len(params) {
@@ -194,6 +255,11 @@ func readFile(path, startLine, endLine string) string {
 			end = e
 		}
 	}
+	// A line range is capped at 512 lines, matching the C2-side clamp. An
+	// invalid end value must not fall back to end-of-file.
+	if end == 0 || end < start+1 || end > start+maxReadFileLines {
+		end = start + maxReadFileLines
+	}
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -207,6 +273,8 @@ func readFile(path, startLine, endLine string) string {
 	var b strings.Builder
 	lineNo := 0
 	reachedStart := false
+	truncated := false
+	maxContent := maxOutputBytes - len(outputTruncatedText)
 	for {
 		line, rerr := r.ReadString('\n')
 		if len(line) > 0 {
@@ -214,6 +282,10 @@ func readFile(path, startLine, endLine string) string {
 			if lineNo > start {
 				reachedStart = true
 				if end > 0 && lineNo > end {
+					break
+				}
+				if b.Len()+len(line) > maxContent {
+					truncated = true
 					break
 				}
 				b.WriteString(line)
@@ -225,6 +297,9 @@ func readFile(path, startLine, endLine string) string {
 	}
 	if !reachedStart {
 		return fmt.Sprintf("Start line %s exceeds file line count (%d)", startLine, lineNo)
+	}
+	if truncated {
+		b.WriteString(outputTruncatedText)
 	}
 	return b.String()
 }
@@ -341,6 +416,9 @@ func copyPath(src, dest string) string {
 		return "Source not found: " + src
 	}
 	if info.IsDir() {
+		if pathIsInside(src, dest) {
+			return "Error: destination is inside source: " + dest
+		}
 		if err := copyTree(src, dest); err != nil {
 			return "Error copying: " + err.Error()
 		}
@@ -355,9 +433,34 @@ func copyPath(src, dest string) string {
 	return fmt.Sprintf("Successfully copied: %s -> %s", src, dest)
 }
 
+// pathIsInside reports whether child is parent itself or a descendant of it.
+// The check is lexical (the destination may not exist yet).
+func pathIsInside(parent, child string) bool {
+	p, err := filepath.Abs(parent)
+	if err != nil {
+		return false
+	}
+	c, err := filepath.Abs(child)
+	if err != nil {
+		return false
+	}
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		p = real
+	}
+	rel, err := filepath.Rel(p, c)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
 func movePath(src, dest string) string {
-	if _, err := os.Stat(src); err != nil {
+	info, err := os.Stat(src)
+	if err != nil {
 		return "Source not found: " + src
+	}
+	if info.IsDir() && pathIsInside(src, dest) {
+		return "Error: destination is inside source: " + dest
 	}
 	if dir := filepath.Dir(dest); dir != "" && dir != "." {
 		_ = os.MkdirAll(dir, 0o755)
@@ -366,7 +469,7 @@ func movePath(src, dest string) string {
 		return fmt.Sprintf("Successfully moved: %s -> %s", src, dest)
 	}
 	// Cross-device fallback: copy then remove.
-	info, _ := os.Stat(src)
+	info, _ = os.Stat(src)
 	if info != nil && info.IsDir() {
 		if err := copyTree(src, dest); err != nil {
 			return "Error moving: " + err.Error()

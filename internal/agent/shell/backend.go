@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"c2agent/internal/agent"
+	"c2agent/internal/limits"
 )
 
 const (
@@ -25,6 +26,7 @@ const (
 	// being drained: its content is discarded anyway, so a runaway command
 	// cannot grow memory without bound.
 	maxDrainLineBuf = 32 * 1024
+	writeTimeout    = 10 * time.Second
 )
 
 type shellResult struct {
@@ -37,6 +39,8 @@ type pendingReq struct {
 	marker      string
 	raw         bool
 	lines       []string
+	bytes       int
+	truncated   bool
 	ch          chan shellResult
 	// draining is set once the request times out: the command is still
 	// running, so its remaining output is discarded (not buffered) while the
@@ -74,6 +78,9 @@ func (b *Backend) isWindows() bool { return b.osName == "Windows" }
 func (b *Backend) write(p []byte) error {
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
+	if err := b.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		return err
+	}
 	_, err := b.conn.Write(p)
 	return err
 }
@@ -216,6 +223,9 @@ func (b *Backend) handleData(data string) {
 			// lines (Windows read_file returns one long base64 line).
 			if b.pending != nil && b.pending.draining && len(b.lineBuf) > maxDrainLineBuf {
 				b.lineBuf = ""
+			} else if b.pending != nil && !b.pending.draining && len(b.lineBuf) > limits.MaxOutputBytes {
+				b.pending.truncated = true
+				b.lineBuf = ""
 			}
 			return
 		}
@@ -230,6 +240,9 @@ func (b *Backend) handleData(data string) {
 			} else {
 				out = stripShellResponse(p.lines, p.marker, p.lastCommand)
 			}
+			if p.truncated {
+				out += limits.OutputTruncatedMarker
+			}
 			select {
 			case p.ch <- shellResult{out: out}:
 			default:
@@ -238,7 +251,13 @@ func (b *Backend) handleData(data string) {
 			continue
 		}
 		if b.pending != nil && !b.pending.draining {
-			b.pending.lines = append(b.pending.lines, line)
+			lineLen := len(line) + 1
+			if b.pending.bytes+lineLen <= limits.MaxOutputBytes {
+				b.pending.lines = append(b.pending.lines, line)
+				b.pending.bytes += lineLen
+			} else {
+				b.pending.truncated = true
+			}
 		}
 	}
 }
@@ -275,7 +294,13 @@ func (b *Backend) Execute(ctx context.Context, action string, params map[string]
 		out = formatListing(out)
 	case "read_file":
 		if b.isWindows() {
-			content, perr := extractWrappedEdit(out, winReadBegin, winReadEnd, winReadMissing)
+			var content, perr string
+			if isWholeFileRead(params) {
+				content, perr = extractWrappedEdit(out, winReadBegin, winReadEnd, winReadMissing)
+			} else {
+				content, perr = extractWrappedRange(out, winReadBegin, winReadEnd, winReadMissing,
+					winRangeMissing, winRangeTooBig)
+			}
 			if perr != "" {
 				return "Error: read failed: " + perr, nil
 			}
@@ -284,10 +309,6 @@ func (b *Backend) Execute(ctx context.Context, action string, params map[string]
 		if isWholeFileRead(params) {
 			// Match the native agents: whole-file reads are capped at 51200 chars.
 			out = truncateRunes(out, 51200)
-		} else if b.isWindows() {
-			// Line ranges are sliced on the control end so original newlines
-			// are preserved (PowerShell's ReadLines/AppendLine would rewrite them).
-			out = sliceLines(out, paramString(params["start_line"]), paramString(params["end_line"]))
 		}
 	}
 	return out, nil
@@ -609,6 +630,20 @@ func extractWrappedText(out, begin, end, missing string) (string, string) {
 		return "", "unexpected response while reading file"
 	}
 	return strings.TrimSpace(strings.Join(lines[bi+1:ei], "\n")), ""
+}
+
+// extractWrappedRange parses a sentinel-wrapped line-range read. RANGE means
+// the start line is past EOF; TOOBIG means the selected bytes exceed the cap.
+func extractWrappedRange(out, begin, end, missing, rangeMissing, tooBig string) (string, string) {
+	for _, l := range strings.Split(out, "\n") {
+		switch strings.TrimSpace(l) {
+		case rangeMissing:
+			return "", "start line exceeds file line count"
+		case tooBig:
+			return "", "selected line range exceeds the shell read limit"
+		}
+	}
+	return extractWrappedEdit(out, begin, end, missing)
 }
 
 // extractWrappedEdit pulls the base64 payload out of a sentinel-wrapped read,

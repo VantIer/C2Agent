@@ -66,5 +66,35 @@ class EditFileTest(unittest.TestCase):
         self.assertTrue(out.startswith("Successfully"), out)
 
 
+class ReadWriteTest(unittest.TestCase):
+    def _write(self, data: bytes) -> str:
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        with open(path, "wb") as f:
+            f.write(data)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_read_file_preserves_newlines(self):
+        path = self._write(b"a\r\nb\r\n")
+        self.assertEqual(local_executor.read_file(path, "0", "0"), "a\r\nb\r\n")
+        self.assertEqual(local_executor.read_file(path, "1", "1"), "a\r\n")
+
+    def test_read_file_line_range_cap(self):
+        path = self._write(b"".join(f"line{i}\n".encode() for i in range(1, 601)))
+        out = local_executor.read_file(path, "1", "999")
+        self.assertEqual(len(out.splitlines()), 512)
+
+    def test_write_file_preserves_content(self):
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        content = "a\r\nb\nc"
+        out = local_executor.write_file(path, content)
+        self.assertTrue(out.startswith("Successfully"), out)
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), content.encode("utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()

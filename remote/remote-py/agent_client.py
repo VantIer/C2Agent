@@ -47,9 +47,9 @@ class AgentClient:
         self._c2_port = c2_port
         self._agent_id = agent_id
         self._auth_token = auth_token
-        self._heartbeat_interval = heartbeat_interval
-        self._reconnect_initial = reconnect_initial
-        self._reconnect_max = reconnect_max
+        self._heartbeat_interval = max(1, int(heartbeat_interval or 30))
+        self._reconnect_initial = max(1.0, float(reconnect_initial or 1.0))
+        self._reconnect_max = max(self._reconnect_initial, float(reconnect_max or 60.0))
         self._reader = PacketReader()
         self._on_packet: Optional[Callable] = None
         self._write_lock = asyncio.Lock()

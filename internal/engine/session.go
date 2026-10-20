@@ -263,6 +263,7 @@ func (e *Engine) runConversation(s *Session) {
 				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
 				continue
 			}
+			command.ClampReadFileRange(action, params)
 			if _, known := command.SpecByName(action); !known {
 				msg := "Error: unknown action: " + action
 				seq := e.appendTool(s, tc.ID, action, params, msg)
@@ -322,6 +323,17 @@ func (e *Engine) runConversation(s *Session) {
 			s.phase = PhaseExec
 			s.mu.Unlock()
 			e.publishNow(s, Event{"type": "executing", "action": action, "params": params})
+
+			// Re-resolve the agent before each action: a reconnect replaces the
+			// registry entry, and the Agent captured at turn start would be the
+			// closed predecessor.
+			ag = e.registry.Get(s.AgentID)
+			if ag == nil {
+				msg := "Error: agent offline"
+				seq := e.appendTool(s, tc.ID, action, params, msg)
+				e.publish(s, seq, Event{"type": "execution_done", "action": action, "params": params, "result": msg})
+				continue
+			}
 
 			job := agent.NewJob(agent.JobAction)
 			job.Action = action

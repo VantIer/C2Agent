@@ -33,7 +33,7 @@ CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o c2agent_remote_darwin_arm64 
     --reconnect-max 60
 ```
 
-或使用扁平 JSON 配置（键名与 `config_remote.json` 相同）：
+或使用扁平 JSON 配置（默认读取同目录下的 `config.json`，键名如下）：
 
 ```json
 {
@@ -48,7 +48,7 @@ CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o c2agent_remote_darwin_arm64 
 ```
 
 ```bash
-./c2agent_remote --config config_remote.json
+./c2agent_remote --config config.json
 ```
 
 命令行参数优先于配置文件；必填：`c2-address` / `agent-id` / `auth-token`。

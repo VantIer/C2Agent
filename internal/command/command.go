@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"c2agent/internal/limits"
 	"c2agent/internal/protocol"
 )
 
@@ -53,7 +54,7 @@ var actionMetas = map[string]actionMeta{
 		"List the contents of a directory on the target.", nil,
 		map[string]string{"path": "Directory path (default '.')."}),
 	"read_file": meta(true,
-		"Read a text file on the target, optionally a line range. Whole-file reads are truncated to 51200 characters.",
+		"Read a text file on the target, optionally a line range. Whole-file reads are truncated to 51200 characters; a line range is limited to 512 lines and 8 MiB of output.",
 		[]string{"path"},
 		map[string]string{
 			"path":       "File path.",
@@ -125,6 +126,36 @@ func init() {
 	for _, s := range Specs {
 		byName[s.Name] = s
 	}
+}
+
+// ClampReadFileRange caps a read_file line range at limits.ReadFileLines.
+// Start/end are 1-based; an empty/zero start means a whole-file read and is
+// left untouched. Invalid or missing end values are replaced so a line-range
+// request can never fall back to end-of-file and return an unbounded range.
+func ClampReadFileRange(action string, params map[string]any) {
+	if action != "read_file" || params == nil {
+		return
+	}
+	start, ok := positiveInt(params["start_line"])
+	if !ok {
+		return
+	}
+	end, ok := positiveInt(params["end_line"])
+	if !ok || end < start || end-start+1 > limits.ReadFileLines {
+		params["end_line"] = strconv.Itoa(start + limits.ReadFileLines - 1)
+	}
+}
+
+func positiveInt(v any) (int, bool) {
+	s := strings.TrimSpace(String(v))
+	if s == "" || s == "0" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	return n, true
 }
 
 // SpecByName returns the spec for an action.

@@ -1,4 +1,4 @@
-// Command c2agent is the C2Agent control端 entry point. It starts the selected
+// Command c2agent is the C2Agent control绔?entry point. It starts the selected
 // controlled-end listeners (native protocol and/or reverse shell) and runs
 // either the CLI or the browser panel.
 package main
@@ -19,12 +19,13 @@ import (
 	"c2agent/internal/cli"
 	"c2agent/internal/config"
 	"c2agent/internal/engine"
+	"c2agent/internal/fileserver"
 	"c2agent/internal/web"
 )
 
 func main() {
-	mode := flag.String("mode", "cli", "run mode: cli | web")
-	cfgPath := flag.String("config", "config_c2.json", "path to the JSON config file")
+	mode := flag.String("mode", "", "run mode: cli | web (overrides config mode)")
+	cfgPath := flag.String("config", "config.json", "path to the JSON config file")
 	flag.Parse()
 
 	logger := log.New(os.Stderr, "[c2agent] ", log.LstdFlags)
@@ -32,6 +33,13 @@ func main() {
 	if err != nil {
 		logger.Fatalf("config: %v", err)
 	}
+
+	runMode := *mode
+	if runMode == "" {
+		runMode = cfg.Mode
+	}
+
+	fileSrv := startFileServer(cfg, logger)
 
 	reg := agent.NewRegistry()
 	cmdTimeout := time.Duration(cfg.Policy.CmdTimeout) * time.Second
@@ -82,7 +90,7 @@ func main() {
 
 	eng := engine.New(cfg, reg)
 
-	switch *mode {
+	switch runMode {
 	case "cli":
 		done := make(chan struct{})
 		go func() {
@@ -111,7 +119,7 @@ func main() {
 			}
 		}
 	default:
-		logger.Fatalf("unknown mode %q (use cli|web)", *mode)
+		logger.Fatalf("unknown mode %q (use cli|web)", runMode)
 	}
 
 	if nativeSrv != nil {
@@ -120,4 +128,32 @@ func main() {
 	if shellSrv != nil {
 		_ = shellSrv.Close()
 	}
+	if fileSrv != nil {
+		_ = fileSrv.Close()
+	}
+}
+
+// startFileServer prepares and starts the optional file server. Invalid
+// settings disable only this feature; the rest of the program keeps running.
+func startFileServer(cfg *config.Config, logger *log.Logger) *fileserver.Server {
+	if !cfg.FileServer.Enabled {
+		return nil
+	}
+	root, err := cfg.PrepareFileServer()
+	if err != nil {
+		logger.Printf("fileserver disabled: %v", err)
+		return nil
+	}
+	srv, err := fileserver.New(fileserver.Options{
+		Host:   cfg.FileServer.ListenHost,
+		Port:   cfg.FileServer.ListenPort,
+		Root:   root,
+		Logger: logger,
+	})
+	if err != nil {
+		logger.Printf("fileserver disabled: %v", err)
+		return nil
+	}
+	logger.Printf("fileserver listening on %s (root %s)", srv.Addr(), root)
+	return srv
 }

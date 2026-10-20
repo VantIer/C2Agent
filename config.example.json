@@ -1,4 +1,6 @@
 {
+  "mode": "cli",
+
   "llm": {
     "api_base": "http://localhost:11434/v1",
     "api_key": "deepseek",
@@ -26,6 +28,13 @@
     "listen_host": "0.0.0.0",
     "listen_port": 8882,
     "bot_prefix": "BOT-"
+  },
+
+  "fileserver": {
+    "enable": false,
+    "listen_host": "0.0.0.0",
+    "listen_port": 8883,
+    "path": ""
   },
 
   "policy": {

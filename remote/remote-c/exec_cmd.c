@@ -78,6 +78,7 @@ char *run_cmd(const char *cmd, int timeout_sec) {
 
     strbuf_t out;
     sb_init(&out);
+    int truncated = 0;
     char buf[8192];
     HANDLE hs[2] = { hOutRd, pi.hProcess };
     int killed = 0;
@@ -99,7 +100,7 @@ char *run_cmd(const char *cmd, int timeout_sec) {
                 if (avail == 0) break;
                 n = (avail > (DWORD)sizeof buf) ? (DWORD)sizeof buf : avail;
                 if (!ReadFile(hOutRd, buf, n, &n, NULL) || n == 0) { done_out = 1; break; }
-                sb_append(&out, buf, n);
+                sb_append_capped(&out, buf, n, &truncated);
             }
             if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) proc_done = 1;
         } else if (w == WAIT_OBJECT_0 + 1) {
@@ -128,6 +129,14 @@ char *run_cmd(const char *cmd, int timeout_sec) {
     }
 
     char *raw = sb_take(&out);
+    if (truncated) {
+        strbuf_t marked;
+        sb_init(&marked);
+        sb_append(&marked, raw, strlen(raw));
+        sb_append(&marked, OUTPUT_TRUNCATED_MARKER, sizeof OUTPUT_TRUNCATED_MARKER - 1);
+        free(raw);
+        raw = sb_take(&marked);
+    }
     /* Console/pipe output from a windowless child is emitted in the OEM
      * code page, so decode from CP_OEMCP rather than CP_ACP. */
     char *utf8 = oem_to_utf8(raw);
@@ -172,6 +181,7 @@ char *run_cmd(const char *cmd, int timeout_sec) {
 
     strbuf_t out;
     sb_init(&out);
+    int truncated = 0;
     char buf[8192];
     int killed = 0;
     int64_t deadline = now_ms() + (int64_t)timeout_sec * 1000;
@@ -207,7 +217,7 @@ char *run_cmd(const char *cmd, int timeout_sec) {
             break;
         }
         if (r == 0) break; /* EOF */
-        sb_append(&out, buf, (size_t)r);
+        sb_append_capped(&out, buf, (size_t)r, &truncated);
     }
     close(p[0]);
 
@@ -220,6 +230,7 @@ char *run_cmd(const char *cmd, int timeout_sec) {
     }
     int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
+    if (truncated) sb_append(&out, OUTPUT_TRUNCATED_MARKER, sizeof OUTPUT_TRUNCATED_MARKER - 1);
     char *text = sb_take(&out);
     char *result;
     if (text && text[0]) {

@@ -437,6 +437,7 @@ func (e *Engine) RunAction(agentID, action string, params map[string]any) (strin
 	j := agent.NewJob(agent.JobDirect)
 	j.Action = action
 	j.Params = params
+	command.ClampReadFileRange(action, params)
 	return e.wait(ag, j)
 }
 

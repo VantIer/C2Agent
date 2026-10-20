@@ -12,7 +12,26 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
+
+	"c2agent/internal/limits"
 )
+
+// TruncateOutput caps s at limits.MaxOutputBytes (including the truncation
+// marker), backing up to a UTF-8 boundary so the result is always valid text.
+func TruncateOutput(s string) string {
+	if len(s) <= limits.MaxOutputBytes {
+		return s
+	}
+	limit := limits.MaxOutputBytes - len(limits.OutputTruncatedMarker)
+	if limit < 0 {
+		limit = 0
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit] + limits.OutputTruncatedMarker
+}
 
 // Kind identifies the controlled-end family.
 type Kind string

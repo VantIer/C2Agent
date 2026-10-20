@@ -347,6 +347,10 @@ static char *act_read_file(char **p, int n) {
         long v = strtol(el, &endp, 10);
         if (endp != el && *endp == '\0' && v > 0) end = (int)v;
     }
+    /* A line range is capped at 512 lines, matching the C2-side clamp. */
+    if (end == 0 || end < start || end > start + MAX_READ_FILE_LINES - 1) {
+        end = start + MAX_READ_FILE_LINES - 1;
+    }
 
     FILE *f = c2a_fopen(path, "rb");
     if (!f) return printf_str("Error reading file: %s", strerror(errno));
@@ -357,6 +361,7 @@ static char *act_read_file(char **p, int n) {
     int lineNo = 0;
     int reachedStart = 0;
     int done = 0;
+    int truncated = 0;
     for (;;) {
         size_t r = fread(buf, 1, sizeof buf, f);
         if (r == 0) break;
@@ -367,14 +372,21 @@ static char *act_read_file(char **p, int n) {
                 if (lineNo >= start) {
                     reachedStart = 1;
                     if (end > 0 && lineNo > end) { done = 1; break; }
-                    if (cur.len) sb_append(&out, cur.data, cur.len);
-                    sb_append(&out, "\n", 1);
+                    sb_append_capped(&out, cur.data, cur.len, &truncated);
+                    if (!truncated) sb_append_capped(&out, "\n", 1, &truncated);
+                    if (truncated) { done = 1; break; }
                 }
                 cur.len = 0;
                 if (cur.data) cur.data[0] = 0;
-            } else if (sb_append(&cur, &ch, 1) != 0) {
-                done = 1;
-                break;
+            } else if (lineNo + 1 >= start) {
+                if (!reachedStart) reachedStart = 1;
+                if (cur.len < MAX_STORED_OUTPUT) {
+                    if (sb_append(&cur, &ch, 1) != 0) { done = 1; break; }
+                } else {
+                    truncated = 1;
+                    done = 1;
+                    break;
+                }
             }
         }
         if (done) break;
@@ -384,7 +396,7 @@ static char *act_read_file(char **p, int n) {
         lineNo++;
         if (lineNo >= start && (end == 0 || lineNo <= end)) {
             reachedStart = 1;
-            sb_append(&out, cur.data, cur.len);
+            sb_append_capped(&out, cur.data, cur.len, &truncated);
         }
     }
     fclose(f);
@@ -393,6 +405,7 @@ static char *act_read_file(char **p, int n) {
         sb_free(&out);
         return printf_str("Start line %s exceeds file line count (%d)", sl, lineNo);
     }
+    if (truncated) sb_append(&out, OUTPUT_TRUNCATED_MARKER, sizeof OUTPUT_TRUNCATED_MARKER - 1);
     return sb_take(&out);
 }
 
@@ -512,6 +525,7 @@ static char *act_copy(char **p, int n) {
     const char *dest = p[1];
     if (!path_exists(src)) return printf_str("Source not found: %s", src);
     if (is_dir(src)) {
+        if (path_is_inside(src, dest)) return xstrdup("Error: destination is inside source");
         if (copy_tree(src, dest) != 0) return printf_str("Error copying: %s", strerror(errno));
     } else {
         make_parent_dirs(dest);
@@ -525,6 +539,7 @@ static char *act_move(char **p, int n) {
     const char *src = p[0];
     const char *dest = p[1];
     if (!path_exists(src)) return printf_str("Source not found: %s", src);
+    if (is_dir(src) && path_is_inside(src, dest)) return xstrdup("Error: destination is inside source");
     make_parent_dirs(dest);
     if (c2a_rename(src, dest) == 0)
         return printf_str("Successfully moved: %s -> %s", src, dest);

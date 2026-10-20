@@ -206,54 +206,44 @@ func (s *Server) handleConn(raw net.Conn) {
 }
 
 func (s *Server) readRegister(conn net.Conn, pr *protocol.PacketReader) (string, error) {
-	deadline := time.Now().Add(30 * time.Second)
-	buf := make([]byte, 4096)
-	for {
-		pkt, err := pr.NextPacket()
-		if err != nil {
-			return "", err
-		}
-		if pkt != nil {
-			if pkt.Cmd != protocol.CmdRegister {
-				return "", fmt.Errorf("first packet not register: %#x", pkt.Cmd)
-			}
-			params, derr := protocol.DecodeTLV(pkt.Body)
-			if derr != nil || len(params) == 0 || params[0] == "" {
-				return "", fmt.Errorf("register missing nonce")
-			}
-			return params[0], nil
-		}
-		_ = conn.SetReadDeadline(deadline)
-		n, rerr := conn.Read(buf)
-		if n > 0 {
-			pr.Feed(buf[:n])
-		}
-		if rerr != nil {
-			return "", rerr
-		}
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("register timeout")
-		}
+	pkt, err := s.waitHandshakePacket(conn, pr, protocol.CmdRegister)
+	if err != nil {
+		return "", err
 	}
+	params, derr := protocol.DecodeTLV(pkt.Body)
+	if derr != nil || len(params) == 0 || params[0] == "" {
+		return "", fmt.Errorf("register missing nonce")
+	}
+	return params[0], nil
 }
 
 func (s *Server) waitConfirm(conn net.Conn, pr *protocol.PacketReader) (string, string, string, error) {
+	pkt, err := s.waitHandshakePacket(conn, pr, protocol.CmdRegisterConfirm)
+	if err != nil {
+		return "", "", "", err
+	}
+	params, derr := protocol.DecodeTLV(pkt.Body)
+	if derr != nil || len(params) < 3 || params[0] == "" {
+		return "", "", "", fmt.Errorf("register_confirm missing identity")
+	}
+	return params[0], params[1], params[2], nil
+}
+
+// waitHandshakePacket reads one packet while the connection is still in the
+// pre-encryption handshake, enforcing the 30s registration deadline.
+func (s *Server) waitHandshakePacket(conn net.Conn, pr *protocol.PacketReader, want uint8) (*protocol.Packet, error) {
 	deadline := time.Now().Add(30 * time.Second)
 	buf := make([]byte, 4096)
 	for {
 		pkt, err := pr.NextPacket()
 		if err != nil {
-			return "", "", "", err
+			return nil, err
 		}
 		if pkt != nil {
-			if pkt.Cmd != protocol.CmdRegisterConfirm {
-				return "", "", "", fmt.Errorf("expected register_confirm, got %#x", pkt.Cmd)
+			if pkt.Cmd != want {
+				return nil, fmt.Errorf("expected handshake cmd %#x, got %#x", want, pkt.Cmd)
 			}
-			params, derr := protocol.DecodeTLV(pkt.Body)
-			if derr != nil || len(params) < 3 || params[0] == "" {
-				return "", "", "", fmt.Errorf("register_confirm missing identity")
-			}
-			return params[0], params[1], params[2], nil
+			return pkt, nil
 		}
 		_ = conn.SetReadDeadline(deadline)
 		n, rerr := conn.Read(buf)
@@ -261,10 +251,10 @@ func (s *Server) waitConfirm(conn net.Conn, pr *protocol.PacketReader) (string, 
 			pr.Feed(buf[:n])
 		}
 		if rerr != nil {
-			return "", "", "", rerr
+			return nil, rerr
 		}
 		if time.Now().After(deadline) {
-			return "", "", "", fmt.Errorf("register_confirm timeout")
+			return nil, fmt.Errorf("handshake packet timeout")
 		}
 	}
 }

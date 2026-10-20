@@ -183,7 +183,7 @@ C2Agent/
 ├── design.md                     # 本文档
 ├── go.mod                        # module c2agent（Go 1.22+；依赖 openai-go，纯 Go 无 CGO）
 ├── README.md
-├── config_c2.example.json        # C2 配置示例（含两类受控端）
+├── config.example.json           # C2 配置示例（含两类受控端）
 ├── cmd/
 │   └── c2agent/
 │       └── main.go               # 入口：--mode cli|web --config
@@ -215,6 +215,8 @@ C2Agent/
 │   │   ├── engine.go             # Engine：会话集合 + 授权/轮数 + 每 Agent 活动会话
 │   │   ├── session.go            # Session 模型 + 会话循环（授权/轮数/工具执行）
 │   │   └── events.go             # 订阅广播（SSE 事件，带 session+agent）
+│   ├── fileserver/
+│   │   └── fileserver.go         # 可选静态文件服务器（目录列表/Range 下载/防穿越）
 │   ├── web/
 │   │   ├── server.go             # net/http 路由 + SSE + 文件 API
 │   │   └── ui/                   # go:embed 内嵌前端静态资源
@@ -286,10 +288,11 @@ C2Agent/
 | 0x85 | C2→Agent | shutdown | `reason` |
 | 0x86 | Agent→C2 | register_confirm | `agent_id`,`hostname`,`os`（已加密） |
 
-- `read_file` 整文件读取截断至 **51200 字符**（50 KiB）。该限制在受控端强制：将
+- `read_file` 整文件读取截断至 **51200 字符**（50 KiB）；行范围最多 **512 行**。该限制在受控端强制：
   `remote/remote-c`（`agent.h` 的 `READ_FILE_LIMIT`）与 `remote/remote-py`
-  （`local_executor.py` 的 `[:50000]`）的常量同步为 **51200**（**常量级微调，主流程不变**）；
+  （`local_executor.py` 的 `f.read(51200)`）保持一致；
   超长文件由 LLM 用 `start_line`/`end_line` 分段读取。
+- 所有动作的单次输出上限为 **8 MiB**（C2 与三端受控端双重限制）；超出部分截断并附加标记。
 - 数据包 `DATA_CHUNK_SIZE = 1024`，`end_flag`：0=续传，1=末包。
 - 单个包体上限 **32 MiB**（`MaxBodyLen`）；超限视为协议异常并断开连接（防御畸形 `body_len`）。
 
@@ -414,8 +417,8 @@ shell -> C2:      <交互式回显，若有>
 - 分块：POSIX 32768B、Windows 4096B（编码后仍在内层 shell 命令行长度内）。
 - **跨 OS 路径**：C2 可能与受控端异 OS，远端临时路径用受控端分隔符构造（不用 C2 的
   `filepath`）。路径含 `%name%` 变量模式时拒绝（cmd 无法安全转义）。
-- **行范围读（Windows）**：`read_file` 带行号范围时用 `[IO.File]::ReadLines` **惰性**枚举，
-  内存与请求范围成正比，深层范围无需整文件读入（POSIX 用 `sed`）。
+- **行范围读（Windows）**：`read_file` 带行号范围时用按字节偏移扫描定位起止行，再读取该区间并 base64 返回，
+  保留原始换行；只缓存选中区间，行范围最多 512 行（POSIX 用 `sed`）。
 
 ### 6.5 在线与关闭
 
@@ -788,6 +791,8 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
 | 排队等待（尚未出队） | **否** | Job 在队列中等待任意长时间均有效；仅受会话取消 / Agent 下线影响 |
 | 执行中（dispatcher 已取出） | **是** | `context.WithTimeout(job.ctx, cmd_timeout)` 包裹 Backend 调用 |
 
+> C2 的每次网络写另有 **10 秒写超时**，防止对端停止读取时 dispatcher 被阻塞而绕过上述超时。
+
 执行超时后的处理由 `policy.timeout_action` 决定：
 
 - `"disconnect"`（默认）：认为受控端状态不可靠（可能被挂起命令占用读循环），
@@ -836,7 +841,8 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
 
 ### 11.1 `internal/config`
 
-- 结构：`LLM`、`Web`、`Native`、`Shell`、`Transfer`、`Policy` 分区。
+- 结构：`Mode`、`LLM`、`Web`、`Native`、`Shell`、`FileServer`、`Transfer`、`Policy`。
+- 默认配置文件为 `config.json`（控制端与受控端统一）；`mode` 取 `cli` / `web`（默认 `cli`，非法值回退 `cli`）。
 - 加载 JSON；目录解析（`dl_temp_dir` 空 = `<cwd>/downloads`；`ul_temp_dir` 空 = 系统临时目录）。
 - 校验：`auth_mode∈{0,1,2}`；Native `auth_token` 非空时才能启用；
   端口冲突检测；`cmd_timeout ≥ heartbeat_timeout`。
@@ -885,7 +891,7 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
 - **shellcmd.go**：动作 → 单条 shell 命令（按 OS），含 `formatListing` 归一化，以及
   分段传输命令（`fileSizeCmd`/`readChunkCmd`/`truncateCreateCmd`/`appendBase64Cmd`）。
   读取统一限长：整文件读最多 `readFileByteCap` 字节（**所有平台**，避免大文件耗尽内存）；
-  Windows 行范围读用惰性 `ReadLines`（内存有界且支持深层范围）；`upload`/`download`
+  Windows 行范围读按字节偏移扫描并只读取选中区间（保留原始换行，最多 512 行）；`upload`/`download`
   由 C2 循环按偏移分段（见 §6.4），受控端只执行单条读/追加指令。
 
 ### 11.7 `internal/engine`
@@ -935,19 +941,30 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
 
 ### 11.10 `cmd/c2agent/main.go`
 
-- 解析 `--mode cli|web`、`--config`。
+- 默认读取 `config.json`；解析 `--config`（覆盖默认路径）与 `--mode cli|web`（**优先级高于配置文件的 `mode`**）。
 - 加载配置 → 建 Registry → 按配置启动 `NativeServer` 与 `ShellServer`（各自 goroutine）
   → 建 Engine（会话管理）。每个 Agent 注册时由 Registry 启动其 `runDispatcher`。
-- `--mode cli`：进入 `internal/cli` 循环。
-- `--mode web`：启动 `internal/web` HTTP 服务（SSE + 内嵌 UI），浏览器访问。
+- `--mode cli`（或配置 `mode=cli`）：进入 `internal/cli` 循环。
+- `--mode web`（或配置 `mode=web`）：启动 `internal/web` HTTP 服务（SSE + 内嵌 UI），浏览器访问。
 - 优雅退出：取消 context、关闭监听、关闭所有连接与队列。
+
+### 11.11 `internal/fileserver`
+
+- 完全独立于 C2：仅当 `fileserver.enable=true` 时在独立 goroutine 中监听。
+- 启动前校验端口范围、与 web/native/shell 的监听冲突、根目录存在且为目录；失败只记录日志并禁用该功能。
+- `GET/HEAD /<path>`：目录返回 HTML 列表；普通文件用 `http.ServeContent` 返回（支持 Range/大文件）；不存在返回 404，非普通文件返回 403。
+- 防穿越：拒绝 `..` 段与含 NUL 的路径，经 `filepath.EvalSymlinks` 解析后必须仍位于根目录内，否则返回 403。
+- 资源限制：空闲连接超时 20s；同时处理请求数上限 20（目录条目数不限制）。
+- 无鉴权：仅应部署在受信网络/VPN；默认监听 `0.0.0.0`，建议改为具体内网地址或 `127.0.0.1`。
 
 ---
 
-## 12. 配置样例（`config_c2.example.json`）
+## 12. 配置样例（`config.example.json`）
 
 ```json
 {
+  "mode": "cli",
+
   "llm": {
     "api_base": "http://localhost:11434/v1",
     "api_key": "deepseek",
@@ -977,6 +994,13 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
     "bot_prefix": "BOT-"
   },
 
+  "fileserver": {
+    "enable": false,
+    "listen_host": "0.0.0.0",
+    "listen_port": 8883,
+    "path": ""
+  },
+
   "policy": {
     "auth_mode": 0,
     "round_limit": 20,
@@ -994,6 +1018,8 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
 ```
 
 说明：
+- `mode`：启动模式 `cli` / `web`（默认 `cli`）；命令行 `--mode` 优先级更高。
+- `fileserver`：独立、无鉴权的静态文件服务器；`path` 空 = 程序同目录 `fileserver`（不存在则创建），显式路径必须存在且为目录；配置非法时仅记录错误并禁用该功能，不影响其他组件。
 - `native` 与 `shell` 各自 `enabled` / 监听地址 / 端口，**相互独立**；可只启用其一。
 - Native 必填 `auth_token`（与 `remote` 端 `--auth-token` 一致）；Shell 无鉴权。
 - `policy.auth_mode`：0=N-Auto / 1=H-Auto / 2=F-Auto。
@@ -1016,10 +1042,10 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o bin/c2agent_windows_amd64.ex
 CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -o bin/c2agent_linux_amd64       ./cmd/c2agent
 CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o bin/c2agent_darwin_arm64      ./cmd/c2agent
 
-# 运行（CLI）
-./bin/c2agent --mode cli --config config_c2.json
-# 运行（Web，浏览器打开 http://127.0.0.1:8880）
-./bin/c2agent --mode web --config config_c2.json
+# 运行（默认读取 config.json；模式由配置 mode 决定）
+./bin/c2agent --config config.json
+# 命令行 --mode 覆盖配置文件中的 mode
+./bin/c2agent --mode web --config config.json
 ```
 
 **受控端 A（Native）**：

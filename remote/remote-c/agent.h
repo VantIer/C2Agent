@@ -50,6 +50,11 @@ typedef int sockfd_t;
 #define DATA_CHUNK_SIZE   1024
 #define PROTO_MAX_PATH    4096
 #define READ_FILE_LIMIT   51200
+#define MAX_READ_FILE_LINES 512
+/* Upper bound on a single action result / command output. */
+#define MAX_OUTPUT_BYTES  (8u << 20)
+#define OUTPUT_TRUNCATED_MARKER "\n[... output truncated at 8 MiB]"
+#define MAX_STORED_OUTPUT (MAX_OUTPUT_BYTES - (sizeof OUTPUT_TRUNCATED_MARKER - 1))
 /* Upper bound on a single packet body (32 MiB), matching the Go control end. */
 #define PROTO_MAX_BODY_LEN (32u << 20)
 
@@ -103,7 +108,6 @@ typedef pthread_mutex_t c2a_mutex_t;
 void c2a_mutex_init(c2a_mutex_t *m);
 void c2a_mutex_lock(c2a_mutex_t *m);
 void c2a_mutex_unlock(c2a_mutex_t *m);
-void c2a_mutex_destroy(c2a_mutex_t *m);
 
 /* Initialize process-wide protocol locks; call once at startup. */
 void proto_global_init(void);
@@ -166,6 +170,9 @@ char *run_cmd(const char *cmd, int timeout_sec);
 /* ---------- misc helpers (implemented in protocol.c) ---------- */
 char    *xstrdup(const char *s);
 char    *printf_str(const char *fmt, ...);
+/* Bound an action result, appending a truncation marker when needed. */
+char    *cap_output(const char *s);
+int      path_is_inside(const char *parent, const char *child);
 int      path_exists(const char *p);
 int      is_dir(const char *p);
 void     mkdir_p(const char *path);
@@ -211,6 +218,7 @@ typedef struct {
 void  sb_init(strbuf_t *b);
 void  sb_free(strbuf_t *b);
 int   sb_append(strbuf_t *b, const char *d, size_t n);
+void  sb_append_capped(strbuf_t *b, const char *d, size_t n, int *truncated);
 int   sb_printf(strbuf_t *b, const char *fmt, ...);
 char *sb_take(strbuf_t *b);
 

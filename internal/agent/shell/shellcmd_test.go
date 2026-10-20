@@ -154,20 +154,35 @@ func decodeEncodedCmd(t *testing.T, cmd string) string {
 	return decodeUTF16LE(t, u16)
 }
 
-// sliceLines must preserve original line terminators (unlike a ReadLines +
-// AppendLine round trip, which rewrites LF files to CRLF).
-func TestSliceLinesPreservesTerminators(t *testing.T) {
-	if got := sliceLines("a\nb\nc", "2", "0"); got != "b\nc" {
-		t.Fatalf("LF range = %q, want %q", got, "b\nc")
+func TestPosixPathAvoidsOptionLookalike(t *testing.T) {
+	if got := posixPath("-rf"); got != "'./-rf'" {
+		t.Fatalf("posixPath(-rf) = %q", got)
 	}
-	if got := sliceLines("a\r\nb\r\nc\r\n", "1", "2"); got != "a\r\nb\r\n" {
-		t.Fatalf("CRLF range = %q, want %q", got, "a\r\nb\r\n")
+	if got := posixPath("dir/-rf"); got != "'dir/-rf'" {
+		t.Fatalf("posixPath(dir/-rf) = %q", got)
 	}
-	if got := sliceLines("a\nb\nc\n", "2", "3"); got != "b\nc\n" {
-		t.Fatalf("full range = %q, want %q", got, "b\nc\n")
+}
+
+func TestRemotePathInside(t *testing.T) {
+	posix := target{os: "Linux", env: EnvBash}
+	win := target{os: "Windows", env: EnvPowerShell}
+	cases := []struct {
+		parent, child string
+		t             target
+		want          bool
+	}{
+		{"/tmp/a", "/tmp/a/b", posix, true},
+		{"/tmp/a", "/tmp/ab", posix, false},
+		{".", "sub", posix, true},
+		{"src", "src/sub", posix, true},
+		{"src", "src2", posix, false},
+		{`C:\A`, `c:\a\b`, win, true},
+		{`C:\A`, `C:\AB`, win, false},
 	}
-	if got := sliceLines("only", "2", "0"); !strings.HasPrefix(got, "Start line 2 exceeds") {
-		t.Fatalf("out-of-range should report an error, got %q", got)
+	for _, c := range cases {
+		if got := remotePathInside(c.parent, c.child, c.t); got != c.want {
+			t.Errorf("remotePathInside(%q,%q) = %v, want %v", c.parent, c.child, got, c.want)
+		}
 	}
 }
 

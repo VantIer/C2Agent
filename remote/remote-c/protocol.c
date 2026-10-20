@@ -1,5 +1,6 @@
 /* protocol.c - wire protocol encoding/decoding and helpers. */
 #include "agent.h"
+#include <ctype.h>
 
 /* connection-wide stream encryption state (ChaCha20; implemented below).
  * Forward-declared here because send_all() / recv_more() use them. */
@@ -35,14 +36,6 @@ void c2a_mutex_unlock(c2a_mutex_t *m) {
 #endif
 }
 
-void c2a_mutex_destroy(c2a_mutex_t *m) {
-#ifdef _WIN32
-    DeleteCriticalSection(m);
-#else
-    pthread_mutex_destroy(m);
-#endif
-}
-
 void proto_global_init(void) {
     c2a_mutex_init(&g_write_mu);
 }
@@ -73,6 +66,20 @@ char *printf_str(const char *fmt, ...) {
     vsnprintf(s, (size_t)n + 1, fmt, ap);
     va_end(ap);
     return s;
+}
+
+char *cap_output(const char *s) {
+    static const char suffix[] = OUTPUT_TRUNCATED_MARKER;
+    if (!s) return xstrdup("");
+    size_t len = strlen(s);
+    if (len <= MAX_OUTPUT_BYTES) return xstrdup(s);
+    size_t keep = MAX_OUTPUT_BYTES - (sizeof suffix - 1);
+    while (keep > 0 && ((unsigned char)s[keep] & 0xC0) == 0x80) keep--;
+    char *out = (char *)malloc(keep + sizeof suffix);
+    if (!out) return xstrdup("(out of memory)");
+    memcpy(out, s, keep);
+    memcpy(out + keep, suffix, sizeof suffix);
+    return out;
 }
 
 static void bb_grow(bytebuf_t *b, size_t need) {
@@ -385,6 +392,93 @@ void make_parent_dirs(const char *path) {
     }
 }
 
+/* Normalize a path to an absolute, slash-separated, dot-free form. The result
+ * is used only for lexical containment checks (copy destination inside source). */
+static void normalize_abs_path(const char *in, char *out, size_t outsz) {
+    char tmp[PROTO_MAX_PATH * 2];
+    char abs[PROTO_MAX_PATH * 4];
+    char drive[3] = {0, 0, 0};
+    if (!in || !*in || outsz == 0) { if (outsz) out[0] = 0; return; }
+    snprintf(tmp, sizeof tmp, "%s", in);
+    for (char *q = tmp; *q; q++) if (*q == '\\') *q = '/';
+
+    char *p = tmp;
+    if (isalpha((unsigned char)p[0]) && p[1] == ':') {
+        drive[0] = p[0];
+        drive[1] = ':';
+        p += 2;
+    }
+    if (*p != '/') {
+        char cwd[PROTO_MAX_PATH];
+        cwd[0] = 0;
+        char *raw_cwd = c2a_getcwd();
+        if (raw_cwd) {
+            size_t cl = strlen(raw_cwd);
+            if (cl >= sizeof cwd) cl = sizeof cwd - 1;
+            memcpy(cwd, raw_cwd, cl);
+            cwd[cl] = 0;
+            free(raw_cwd);
+        }
+        for (char *q = cwd; *q; q++) if (*q == '\\') *q = '/';
+        if (!drive[0] && isalpha((unsigned char)cwd[0]) && cwd[1] == ':') {
+            drive[0] = cwd[0];
+            drive[1] = ':';
+        }
+        snprintf(abs, sizeof abs, "%s/%s", cwd, p);
+        p = (drive[0] && isalpha((unsigned char)abs[0]) && abs[1] == ':') ? abs + 2 : abs;
+    }
+
+    size_t cap = strlen(p) / 2 + 4;
+    char **parts = (char **)malloc(cap * sizeof(char *));
+    if (!parts) { out[0] = 0; return; }
+    int n = 0;
+    for (char *tok = strtok(p, "/"); tok; tok = strtok(NULL, "/")) {
+        if (!strcmp(tok, ".")) continue;
+        if (!strcmp(tok, "..")) {
+            if (n > 0) n--;
+            continue;
+        }
+        if ((size_t)n < cap) parts[n++] = tok;
+    }
+
+    size_t off = 0;
+    if (drive[0] && off + 2 < outsz) {
+        out[off++] = drive[0];
+        out[off++] = drive[1];
+    }
+    if (off < outsz - 1) out[off++] = '/';
+    for (int i = 0; i < n && off < outsz - 1; i++) {
+        if (i > 0 && off < outsz - 1) out[off++] = '/';
+        size_t l = strlen(parts[i]);
+        if (l > outsz - 1 - off) l = outsz - 1 - off;
+        memcpy(out + off, parts[i], l);
+        off += l;
+    }
+    free(parts);
+    out[off] = 0;
+}
+
+int path_is_inside(const char *parent, const char *child) {
+    char p[PROTO_MAX_PATH * 2], c[PROTO_MAX_PATH * 2];
+    normalize_abs_path(parent, p, sizeof p);
+    normalize_abs_path(child, c, sizeof c);
+    size_t plen = strlen(p);
+    if (plen == 0) return 0;
+    if (plen > 0 && p[plen - 1] == '/') {
+#ifdef _WIN32
+        return _strnicmp(p, c, plen) == 0;
+#else
+        return strncmp(p, c, plen) == 0;
+#endif
+    }
+#ifdef _WIN32
+    if (_strnicmp(p, c, plen) != 0) return 0;
+#else
+    if (strncmp(p, c, plen) != 0) return 0;
+#endif
+    return c[plen] == 0 || c[plen] == '/';
+}
+
 char *detect_os(void) {
 #ifdef _WIN32
     return xstrdup("Windows");
@@ -603,6 +697,19 @@ int sb_append(strbuf_t *b, const char *d, size_t n) {
     b->len += n;
     b->data[b->len] = 0;
     return 0;
+}
+
+/* Append while bounding retained output. Bytes beyond MAX_STORED_OUTPUT are
+ * discarded, and *truncated is set so callers can append the marker. */
+void sb_append_capped(strbuf_t *b, const char *d, size_t n, int *truncated) {
+    if (*truncated) return;
+    size_t room = b->len < MAX_STORED_OUTPUT ? MAX_STORED_OUTPUT - b->len : 0;
+    if (n > room) {
+        if (room) sb_append(b, d, room);
+        *truncated = 1;
+        return;
+    }
+    sb_append(b, d, n);
 }
 
 int sb_printf(strbuf_t *b, const char *fmt, ...) {

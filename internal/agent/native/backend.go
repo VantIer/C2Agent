@@ -23,6 +23,10 @@ import (
 // the connection before the C2 forces it shut.
 const shutdownGrace = 1 * time.Second
 
+// writeTimeout bounds one socket write so a peer that stops reading cannot
+// block the dispatcher (and defeat cmd_timeout) forever.
+const writeTimeout = 10 * time.Second
+
 type dataChunk struct {
 	flag uint8
 	body []byte
@@ -90,6 +94,9 @@ func (b *Backend) Busy() bool {
 func (b *Backend) write(pkt []byte) error {
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
+	if err := b.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		return err
+	}
 	_, err := b.conn.Write(pkt)
 	return err
 }
@@ -131,6 +138,37 @@ func (b *Backend) deliver(pkt *protocol.Packet) {
 	}
 }
 
+// registerPending allocates a request id and registers its response channel.
+// The returned cleanup must be called when the request leaves its waiting
+// state (normally deferred by the caller).
+func (b *Backend) registerPending() (uint64, chan string, func()) {
+	reqID := b.nextReq.Add(1)
+	ch := make(chan string, 1)
+	b.pendingMu.Lock()
+	b.pending[reqID] = ch
+	b.pendingMu.Unlock()
+	return reqID, ch, func() {
+		b.pendingMu.Lock()
+		delete(b.pending, reqID)
+		b.pendingMu.Unlock()
+	}
+}
+
+// awaitPending waits for the response channel, context deadline or connection
+// close. A timed-out request is marked late so Busy() protects the agent until
+// the controlled end finishes it.
+func (b *Backend) awaitPending(ctx context.Context, reqID uint64, ch chan string) (string, error) {
+	select {
+	case out := <-ch:
+		return out, nil
+	case <-ctx.Done():
+		b.markLate(reqID)
+		return "", ctx.Err()
+	case <-b.done:
+		return "", agent.NewNetworkError("connection closed")
+	}
+}
+
 func (b *Backend) forward(ctx context.Context, cmd uint8, params []string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -138,16 +176,8 @@ func (b *Backend) forward(ctx context.Context, cmd uint8, params []string) (stri
 	if b.Busy() {
 		return "", agent.ErrAgentBusy
 	}
-	reqID := b.nextReq.Add(1)
-	ch := make(chan string, 1)
-	b.pendingMu.Lock()
-	b.pending[reqID] = ch
-	b.pendingMu.Unlock()
-	defer func() {
-		b.pendingMu.Lock()
-		delete(b.pending, reqID)
-		b.pendingMu.Unlock()
-	}()
+	reqID, ch, cleanup := b.registerPending()
+	defer cleanup()
 
 	pkt, err := protocol.EncodeRequest(reqID, cmd, params)
 	if err != nil {
@@ -156,17 +186,7 @@ func (b *Backend) forward(ctx context.Context, cmd uint8, params []string) (stri
 	if err := b.write(pkt); err != nil {
 		return "", agent.NewNetworkError("send: %v", err)
 	}
-	select {
-	case out := <-ch:
-		return out, nil
-	case <-ctx.Done():
-		// The agent may still be running the command; remember the request so
-		// the backend reports Busy until its late response arrives.
-		b.markLate(reqID)
-		return "", ctx.Err()
-	case <-b.done:
-		return "", agent.NewNetworkError("connection closed")
-	}
+	return b.awaitPending(ctx, reqID, ch)
 }
 
 // Execute implements agent.Backend.
@@ -200,16 +220,8 @@ func (b *Backend) Upload(ctx context.Context, localPath, destPath string) (strin
 	}
 	defer f.Close()
 
-	reqID := b.nextReq.Add(1)
-	ch := make(chan string, 1)
-	b.pendingMu.Lock()
-	b.pending[reqID] = ch
-	b.pendingMu.Unlock()
-	defer func() {
-		b.pendingMu.Lock()
-		delete(b.pending, reqID)
-		b.pendingMu.Unlock()
-	}()
+	reqID, ch, cleanup := b.registerPending()
+	defer cleanup()
 
 	initPkt, err := protocol.EncodeRequest(reqID, protocol.CmdUpload, []string{destPath})
 	if err != nil {
@@ -251,15 +263,7 @@ func (b *Backend) Upload(ctx context.Context, localPath, destPath string) (strin
 		}
 	}
 
-	select {
-	case out := <-ch:
-		return out, nil
-	case <-ctx.Done():
-		b.markLate(reqID)
-		return "", ctx.Err()
-	case <-b.done:
-		return "", agent.NewNetworkError("connection closed")
-	}
+	return b.awaitPending(ctx, reqID, ch)
 }
 
 // Download fetches srcPath into <destDir>/<basename(srcPath)>, overwriting.

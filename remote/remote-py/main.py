@@ -28,14 +28,22 @@ from handler import Handler
 REQUIRED_FIELDS = {"c2_address", "agent_id", "auth_token"}
 
 
-def _load_config_file(path: str) -> dict:
+def _load_config_file(path: str, explicit: bool) -> dict:
+    """Load a config file using the same relative-path rule as the other
+    controlled ends: current working directory first, then the source bundle
+    directory as a compatibility fallback."""
     p = Path(path)
-    if not p.is_absolute():
-        p = Path(base_path) / path
-    if not p.exists():
+    candidates = [p] if p.is_absolute() else [Path.cwd() / p, Path(base_path) / p]
+    chosen = next((c for c in candidates if c.exists()), None)
+    if chosen is None:
+        if explicit:
+            raise SystemExit(f"config file not found: {path}")
         return {}
-    with open(p, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(chosen, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"cannot parse config file {chosen}: {e}")
 
 
 def _parse_c2_address(addr):
@@ -54,7 +62,7 @@ def _parse_c2_address(addr):
 
 def _build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Remote Agent daemon")
-    p.add_argument("--config", default=None, help="Optional config file (JSON)")
+    p.add_argument("--config", default=None, help="JSON config file (default config.json)")
     p.add_argument("--c2-address", default=None, type=_parse_c2_address,
                    help="C2 host:port (e.g. 192.168.1.100:8881)")
     p.add_argument("--agent-id", default=None, help="Unique agent id")
@@ -72,8 +80,8 @@ def _build_argparser() -> argparse.ArgumentParser:
 
 def _merge_config(args: argparse.Namespace) -> dict:
     cfg = {}
-    if args.config:
-        cfg.update(_load_config_file(args.config))
+    explicit = args.config is not None
+    cfg.update(_load_config_file(args.config or "config.json", explicit))
 
     cli_overrides = {
         "c2_address": args.c2_address,

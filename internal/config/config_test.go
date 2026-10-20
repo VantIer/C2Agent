@@ -19,6 +19,27 @@ func TestDefaultValid(t *testing.T) {
 	}
 }
 
+func TestModeDefaultsAndValidation(t *testing.T) {
+	cfg := Default()
+	if cfg.Mode != "cli" {
+		t.Fatalf("default mode should be cli, got %q", cfg.Mode)
+	}
+	if err := cfg.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Mode = "web"
+	if err := cfg.normalize(); err != nil {
+		t.Fatalf("web mode should be valid: %v", err)
+	}
+	cfg.Mode = "gui"
+	if err := cfg.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mode != "cli" {
+		t.Fatalf("invalid mode should fall back to cli, got %q", cfg.Mode)
+	}
+}
+
 func TestAuthModeNormalization(t *testing.T) {
 	cfg := Default()
 	cfg.Policy.AuthMode = 9
@@ -68,6 +89,41 @@ func TestWebListenerPortConflict(t *testing.T) {
 	cfg.Web.ListenPort = cfg.Native.ListenPort
 	if err := cfg.normalize(); err == nil {
 		t.Fatal("expected web/native port conflict")
+	}
+}
+
+func TestFileServerValidation(t *testing.T) {
+	cfg := Default()
+	cfg.FileServer.Enabled = true
+	cfg.FileServer.Path = t.TempDir()
+	if _, err := cfg.PrepareFileServer(); err != nil {
+		t.Fatalf("valid file server config rejected: %v", err)
+	}
+
+	cfg.FileServer.Path = filepath.Join(t.TempDir(), "missing")
+	if _, err := cfg.PrepareFileServer(); err == nil {
+		t.Fatal("expected error for missing directory")
+	}
+
+	cfg.FileServer.Path = filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(cfg.FileServer.Path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.PrepareFileServer(); err == nil {
+		t.Fatal("expected error for a regular file")
+	}
+
+	cfg.FileServer.Path = t.TempDir()
+	cfg.FileServer.ListenPort = cfg.Web.ListenPort
+	if _, err := cfg.PrepareFileServer(); err == nil {
+		t.Fatal("expected web/fileserver port conflict")
+	}
+
+	cfg.FileServer.Enabled = false
+	cfg.FileServer.Path = ""
+	cfg.FileServer.ListenPort = 99999
+	if _, err := cfg.PrepareFileServer(); err != nil {
+		t.Fatalf("disabled file server should not be validated: %v", err)
 	}
 }
 

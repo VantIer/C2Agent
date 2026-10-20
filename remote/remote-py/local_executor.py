@@ -11,6 +11,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from limits import MAX_CONTENT_BYTES, MAX_READ_FILE_LINES, OUTPUT_TRUNCATED
+
 
 def list_dir(path: str = ".") -> str:
     try:
@@ -102,7 +104,8 @@ def read_file(path: str, start_line: str = "0", end_line: str = "0") -> str:
         if start_line in ("", "0"):
             # Whole-file read capped at 51200 characters: open in text mode and
             # read only the limit, so a huge file is never loaded in full.
-            with open(target, "r", encoding="utf-8") as f:
+            # newline="" preserves the file's original line endings.
+            with open(target, "r", encoding="utf-8", newline="") as f:
                 return f.read(51200)
 
         try:
@@ -116,21 +119,35 @@ def read_file(path: str, start_line: str = "0", end_line: str = "0") -> str:
             except ValueError:
                 end = None  # invalid end_line -> to end of file
 
+        # A line range is capped at 512 lines, matching the C2-side clamp.
+        if end is None or end < start + 1 or end > start + MAX_READ_FILE_LINES:
+            end = start + MAX_READ_FILE_LINES
+
         # Stream line by line, keeping only the requested range.
         out = []
         line_no = 0
         reached_start = False
-        with open(target, "r", encoding="utf-8") as f:
+        total = 0
+        truncated = False
+        with open(target, "r", encoding="utf-8", newline="") as f:
             for line in f:
                 line_no += 1
                 if line_no > start:
                     reached_start = True
                     if end is not None and line_no > end:
                         break
+                    size = len(line.encode("utf-8"))
+                    if total + size > MAX_CONTENT_BYTES:
+                        truncated = True
+                        break
                     out.append(line)
+                    total += size
         if not reached_start:
             return f"Start line {start_line} exceeds file line count ({line_no})"
-        return "".join(out)
+        result = "".join(out)
+        if truncated:
+            result += OUTPUT_TRUNCATED
+        return result
     except Exception as e:
         return f"Error reading file: {str(e)}"
 
@@ -139,7 +156,7 @@ def write_file(path: str, content: str) -> str:
     try:
         target = Path(path).resolve()
         target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, "w", encoding="utf-8") as f:
+        with open(target, "w", encoding="utf-8", newline="") as f:
             f.write(content)
         return f"Successfully wrote to: {path}"
     except Exception as e:
@@ -195,6 +212,17 @@ def edit_file(path: str, old_text: str, new_text: str = "") -> str:
         return f"Error editing file: {str(e)}"
 
 
+def _path_inside(parent: Path, child: Path) -> bool:
+    """Lexical containment check (the destination may not exist yet)."""
+    try:
+        p = parent.resolve()
+        c = child.resolve()
+        c.relative_to(p)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def copy(src: str, dest: str) -> str:
     try:
         src_path = Path(src)
@@ -202,6 +230,8 @@ def copy(src: str, dest: str) -> str:
         if not src_path.exists():
             return f"Source not found: {src}"
         if src_path.is_dir():
+            if _path_inside(src_path, dest_path):
+                return f"Error: destination is inside source: {dest}"
             shutil.copytree(src_path, dest_path)
         else:
             dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -217,6 +247,8 @@ def move(src: str, dest: str) -> str:
         dest_path = Path(dest)
         if not src_path.exists():
             return f"Source not found: {src}"
+        if src_path.is_dir() and _path_inside(src_path, dest_path):
+            return f"Error: destination is inside source: {dest}"
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src_path), str(dest_path))
         return f"Successfully moved: {src} -> {dest}"
@@ -248,6 +280,7 @@ def _console_encoding() -> str:
 def exec_cmd(cmd: str, timeout: int = 60) -> str:
     if not cmd:
         return "Error: Empty command"
+    timeout = max(1, int(timeout or 60))
     try:
         encoding = _console_encoding()
         result = subprocess.run(

@@ -424,7 +424,10 @@ func parseListing(text string) []map[string]any {
 		if m == nil {
 			continue
 		}
-		size, _ := strconv.Atoi(m[2])
+		size, err := strconv.ParseInt(m[2], 10, 64)
+		if err != nil {
+			size = 0
+		}
 		items = append(items, map[string]any{"name": m[3], "is_dir": m[1] == "DIR", "size": size})
 	}
 	return items

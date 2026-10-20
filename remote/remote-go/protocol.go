@@ -183,6 +183,9 @@ func readPacket(conn net.Conn, pr *packetReader, timeout time.Duration) (*packet
 			return nil, err
 		}
 		if pkt != nil {
+			// Clear the temporary transfer deadline; the normal serve loop must
+			// block indefinitely (heartbeats keep the connection alive).
+			_ = conn.SetReadDeadline(time.Time{})
 			return pkt, nil
 		}
 		if err := conn.SetReadDeadline(deadline); err != nil {
