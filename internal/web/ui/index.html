@@ -15,7 +15,7 @@
             --result-bg: #eef1f7; --result-text: #334155; --result-border: #d5dbe8;
             --result-inner: #e2e7f1; --result-hi: rgba(255,255,255,0.7);
             --shadow: 0 10px 30px rgba(31,35,51,0.08); --shadow-sm: 0 2px 8px rgba(31,35,51,0.06);
-            --sidebar-w: 260px; --session-w: 220px;
+            --sidebar-w: 200px; --session-w: 200px;
         }
         [data-theme="dark"] {
             --bg: #0f1117; --surface: #171a21; --surface-2: #1e222b; --border: #2a2f3a;
@@ -56,7 +56,7 @@
         .agent-empty, .session-empty { padding: 24px 16px; text-align: center; color: var(--text-3); font-size: 13px; }
 
         .session-sidebar { position: relative; width: var(--session-w); background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 16px 0; }
-        .session-item { display: flex; align-items: center; gap: 8px; padding: 9px 12px 9px 16px; cursor: pointer; border-left: 3px solid transparent; transition: background .12s; }
+        .session-item { display: flex; align-items: center; gap: 8px; padding: 10px 16px; cursor: pointer; border-left: 3px solid transparent; transition: background .12s; }
         .session-item:hover { background: var(--surface-2); }
         .session-item.active { background: var(--accent-soft); border-left-color: var(--accent); }
         .session-item .smeta { flex: 1; min-width: 0; }
@@ -204,7 +204,7 @@
             .composer { padding: 12px 14px 16px; }
             body.agent-sidebar-open .main { margin-left: 0; }
             body.agent-sidebar-open .command-panel { margin-left: 0; }
-            .sidebar-dock { width: 100vw; max-width: 480px; }
+            .sidebar-dock { width: 100vw; max-width: 400px; }
             .agent-sidebar, .session-sidebar { width: auto; flex: 1 1 50%; min-width: 0; }
         }
     </style>
