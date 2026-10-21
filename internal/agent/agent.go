@@ -41,9 +41,11 @@ const (
 	KindShell  Kind = "shell"  // raw reverse shell
 )
 
-// Backend executes high-level actions on one controlled end. Both backends
-// must honor ctx cancellation and return *NetworkError / *TimeoutError for
-// transport problems.
+// Backend executes high-level actions on one controlled end. Execute, Upload
+// and Download must honor ctx cancellation and return *NetworkError /
+// *TimeoutError for transport problems. Shutdown is a one-way local operation:
+// it must return within a bounded time even if the peer stops responding, and
+// it does not wait for or confirm remote processing.
 type Backend interface {
 	// Execute runs a high-level action (name matches the LLM tool schema).
 	Execute(ctx context.Context, action string, params map[string]any) (string, error)
@@ -51,7 +53,11 @@ type Backend interface {
 	Upload(ctx context.Context, localPath, destPath string) (string, error)
 	// Download fetches srcPath into <destDir>/<basename(srcPath)>, overwriting.
 	Download(ctx context.Context, srcPath, destDir string) (string, error)
-	// Shutdown terminates the controlled-end process / connection.
+	// Shutdown asks the controlled end to terminate and completes the local
+	// shutdown procedure (including a bounded force-close if the peer does not
+	// close). It must not block indefinitely. A nil return means the request
+	// was written locally and the local procedure finished; it does not prove
+	// that the remote received or executed it.
 	Shutdown(ctx context.Context) error
 	// Close releases the underlying connection.
 	Close() error

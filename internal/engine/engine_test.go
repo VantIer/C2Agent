@@ -399,6 +399,79 @@ func TestSessionsSurviveAgentDisconnect(t *testing.T) {
 	}
 }
 
+// A shutdown that closes the agent before its job result is delivered must
+// still report success: the disconnect is the expected outcome, not a failure.
+type shutdownCloseBackend struct {
+	fakeBackend
+	ag *agent.Agent
+}
+
+func (b *shutdownCloseBackend) Shutdown(context.Context) error {
+	b.ag.Close()
+	return nil
+}
+
+func TestShutdownSurvivesCloseResultRace(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		reg := agent.NewRegistry()
+		br := &shutdownCloseBackend{}
+		ag := agent.New(agent.Options{ID: "a1", Kind: agent.KindNative, Backend: br})
+		br.ag = ag
+		reg.Register(ag)
+		eng := NewWithClient(config.Default(), reg, &fakeLLM{})
+
+		errCh := make(chan error, 1)
+		go func() { errCh <- eng.ShutdownAgent("a1") }()
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("iteration %d: ShutdownAgent returned %v", i, err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("iteration %d: ShutdownAgent hung", i)
+		}
+	}
+}
+
+// A shutdown that never reached the dispatcher has no result to wait for; the
+// closed-agent fallback must still return promptly.
+func TestShutdownNotStartedReportsClosed(t *testing.T) {
+	ag := agent.New(agent.Options{ID: "a1", Kind: agent.KindShell, Backend: &fakeBackend{}})
+	ag.Close()
+
+	j := agent.NewJob(agent.JobShutdown)
+	_, err := waitJob(ag, j)
+	if !errors.Is(err, agent.ErrClosed) {
+		t.Fatalf("expected ErrClosed, got %v", err)
+	}
+}
+
+// Once started, a shutdown's real result must win over the closed-agent
+// fallback, including a write failure reported by the backend.
+type shutdownCloseErrBackend struct {
+	fakeBackend
+	ag *agent.Agent
+}
+
+func (b *shutdownCloseErrBackend) Shutdown(context.Context) error {
+	b.ag.Close()
+	return agent.NewNetworkError("write failed")
+}
+
+func TestShutdownStartedKeepsBackendError(t *testing.T) {
+	reg := agent.NewRegistry()
+	br := &shutdownCloseErrBackend{}
+	ag := agent.New(agent.Options{ID: "a1", Kind: agent.KindNative, Backend: br})
+	br.ag = ag
+	reg.Register(ag)
+	eng := NewWithClient(config.Default(), reg, &fakeLLM{})
+
+	err := eng.ShutdownAgent("a1")
+	if err == nil || !strings.Contains(err.Error(), "write failed") {
+		t.Fatalf("expected the backend's write error, got %v", err)
+	}
+}
+
 func TestMultiSessionSameAgent(t *testing.T) {
 	br := &fakeBackend{}
 	reg := newTestAgent(t, br)

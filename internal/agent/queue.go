@@ -39,6 +39,7 @@ type Job struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	cancelled atomic.Bool
+	started   atomic.Bool
 }
 
 // NewJob creates a job with its own cancellable context and result channel.
@@ -62,6 +63,13 @@ func (j *Job) Cancel() {
 
 // Cancelled reports whether the job was cancelled.
 func (j *Job) Cancelled() bool { return j.cancelled.Load() }
+
+// Started reports whether the dispatcher has taken ownership of the job. Once
+// true, execJob will deliver exactly one result on Result: every path after the
+// ownership check reaches the final send, including cancellation and execution
+// timeouts. This assumes the backend call returns (it is not guaranteed if a
+// backend blocks forever).
+func (j *Job) Started() bool { return j.started.Load() }
 
 // Enqueue appends a job to the linear queue. Waiting for queue space is not
 // subject to any timeout; it only ends when the job is accepted or the agent
@@ -104,6 +112,9 @@ func (a *Agent) execJob(j *Job) {
 		j.Result <- JobResult{Err: ErrCancelled}
 		return
 	}
+	// Mark ownership only after the early return: from here on every path
+	// reaches the final send, so waiters may safely block on Result.
+	j.started.Store(true)
 	atomic.AddInt32(&a.activeOps, 1)
 	defer atomic.AddInt32(&a.activeOps, -1)
 

