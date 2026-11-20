@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -13,6 +14,10 @@ import (
 	"c2agent/internal/crypto"
 	"c2agent/internal/protocol"
 )
+
+// maxAgentTimingSec bounds the timing values sent to an agent. It mirrors the
+// control-end configuration limit and protects integer-based agents.
+const maxAgentTimingSec = 600
 
 // ServerOptions configures the native protocol listener.
 type ServerOptions struct {
@@ -24,7 +29,12 @@ type ServerOptions struct {
 	CmdTimeout       time.Duration
 	TimeoutAction    string
 	QueueCapacity    int
-	Logger           *log.Logger
+	// AgentHeartbeatIntervalSec / AgentCmdTimeoutSec are sent to the agent in
+	// the registration ACK. Zero values are derived from HeartbeatTimeout /
+	// CmdTimeout so tests and embedders stay backward compatible.
+	AgentHeartbeatIntervalSec int
+	AgentCmdTimeoutSec        int
+	Logger                    *log.Logger
 }
 
 // Server accepts native agent connections and registers them.
@@ -177,6 +187,14 @@ func (s *Server) handleConn(raw net.Conn) {
 	}
 
 	backend := NewBackend(enc)
+	// The registration ACK is the first encrypted C2 -> Agent packet. It
+	// carries the runtime timing the agent must use (heartbeat interval and
+	// command timeout).
+	if err := s.sendRegisterAck(backend); err != nil {
+		s.logger.Printf("native register_ack failed for %s: %v", raw.RemoteAddr(), err)
+		return
+	}
+
 	ag := agent.New(agent.Options{
 		ID:            id,
 		Kind:          agent.KindNative,
@@ -203,6 +221,49 @@ func (s *Server) handleConn(raw net.Conn) {
 
 	s.readLoop(enc, pr, backend, ag)
 	s.opts.Registry.UnregisterAgent(ag)
+}
+
+// agentTiming resolves the values sent in the registration ACK. The explicit
+// options win; otherwise they are derived from the server's configured
+// timeouts (heartbeat = ceil(2/3 * timeout)).
+func (s *Server) agentTiming() (heartbeatSec, cmdTimeoutSec int) {
+	heartbeatSec = s.opts.AgentHeartbeatIntervalSec
+	if heartbeatSec <= 0 {
+		base := int(s.opts.HeartbeatTimeout / time.Second)
+		if base <= 0 {
+			base = 60
+		}
+		heartbeatSec = (2*base + 2) / 3
+	}
+	if heartbeatSec < 1 {
+		heartbeatSec = 1
+	}
+	if heartbeatSec > maxAgentTimingSec {
+		heartbeatSec = maxAgentTimingSec
+	}
+	cmdTimeoutSec = s.opts.AgentCmdTimeoutSec
+	if cmdTimeoutSec <= 0 {
+		cmdTimeoutSec = int(s.opts.CmdTimeout / time.Second)
+	}
+	if cmdTimeoutSec < 1 {
+		cmdTimeoutSec = 60
+	}
+	if cmdTimeoutSec > maxAgentTimingSec {
+		cmdTimeoutSec = maxAgentTimingSec
+	}
+	return heartbeatSec, cmdTimeoutSec
+}
+
+// sendRegisterAck sends register_ack([heartbeat_interval_sec, cmd_timeout]).
+func (s *Server) sendRegisterAck(backend *Backend) error {
+	heartbeatSec, cmdTimeoutSec := s.agentTiming()
+	pkt, err := protocol.EncodeControl(0, protocol.CmdRegisterAck, []string{
+		strconv.Itoa(heartbeatSec), strconv.Itoa(cmdTimeoutSec),
+	})
+	if err != nil {
+		return err
+	}
+	return backend.write(pkt)
 }
 
 func (s *Server) readRegister(conn net.Conn, pr *protocol.PacketReader) (string, error) {
@@ -299,7 +360,7 @@ func (s *Server) dispatch(backend *Backend, ag *agent.Agent, pkt *protocol.Packe
 		return true
 	case protocol.CmdDisconnect:
 		return false
-	case protocol.CmdRegisterResponse, protocol.CmdShutdown:
+	case protocol.CmdRegisterResponse, protocol.CmdRegisterAck, protocol.CmdShutdown:
 		return true
 	default:
 		backend.deliver(pkt)

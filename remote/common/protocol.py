@@ -54,6 +54,7 @@ CMD_HEARTBEAT_ACK = 0x83
 CMD_DISCONNECT = 0x84
 CMD_SHUTDOWN = 0x85
 CMD_REGISTER_CONFIRM = 0x86
+CMD_REGISTER_ACK = 0x87
 
 CONTROL_CMDS = {
     CMD_REGISTER: "register",
@@ -63,6 +64,7 @@ CONTROL_CMDS = {
     CMD_DISCONNECT: "disconnect",
     CMD_SHUTDOWN: "shutdown",
     CMD_REGISTER_CONFIRM: "register_confirm",
+    CMD_REGISTER_ACK: "register_ack",
 }
 
 ACTION_NAME_TO_CMD = {v[0]: k for k, v in ACTION_CMDS.items()}

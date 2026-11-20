@@ -53,6 +53,7 @@ const (
 	CmdDisconnect       = 0x84
 	CmdShutdown         = 0x85
 	CmdRegisterConfirm  = 0x86
+	CmdRegisterAck      = 0x87
 )
 
 // File-transfer data packet end flags (occupy the cmd byte).
@@ -110,5 +111,5 @@ func IsRequestCmd(code uint8) bool { return requestCmds[code] }
 
 // IsControlCmd reports whether code is a control command.
 func IsControlCmd(code uint8) bool {
-	return code >= 0x80 && code <= 0x86
+	return code >= 0x80 && code <= 0x87
 }

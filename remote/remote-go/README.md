@@ -27,8 +27,6 @@ CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o c2agent_remote_darwin_arm64 
     --c2-address 192.168.1.100:8881 \
     --agent-id server-01 \
     --auth-token <与 C2 的 native.auth_token 一致> \
-    --heartbeat-interval 30 \
-    --cmd-timeout 60 \
     --reconnect-initial 1 \
     --reconnect-max 60
 ```
@@ -40,8 +38,6 @@ CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o c2agent_remote_darwin_arm64 
   "c2_address": "192.168.1.100:8881",
   "agent_id": "server-01",
   "auth_token": "change-me-shared-token",
-  "heartbeat_interval_sec": 30,
-  "cmd_timeout": 60,
   "reconnect_initial_sec": 1,
   "reconnect_max_sec": 60
 }
@@ -57,10 +53,13 @@ CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o c2agent_remote_darwin_arm64 
 
 - **无头守护进程**：主动拨号 → 注册 → 心跳 → 处理指令；断线按指数退避重连。
 - **握手**：`register(随机 nonce，明文)` → 校验 `register_response = sha256(nonce+token)` →
-  `register_confirm(agent_id/hostname/os，已加密)`；其后全流量 ChaCha20，key 与 nonce
-  每连接由握手 nonce 派生（一次一密）：`key(dir)=sha256(nonce+token+nonce+dir)`、
-  `nonce(dir)=sha256(token+nonce+token+dir)[:12]`，`dir` 区分双向。
-- **心跳**：每 `heartbeat-interval` 秒发送；读取使用读超时以便在空闲时也按时发送。
+  `register_confirm(agent_id/hostname/os，已加密)` → 读取 `register_ack(0x87，已加密)`；
+  其后全流量 ChaCha20，key 与 nonce 每连接由握手 nonce 派生（一次一密）：
+  `key(dir)=sha256(nonce+token+nonce+dir)`、`nonce(dir)=sha256(token+nonce+token+dir)[:12]`，
+  `dir` 区分双向。
+- **运行参数**：心跳间隔与命令超时由 `register_ack` 下发
+  （`heartbeat_interval_sec`、`cmd_timeout`），本地配置/CLI 不包含这两项。`runtime_config.go`
+  用读写锁保存；命令在下一次执行、心跳在下一次周期读取新值，无需重启。
 - **动作**：`get_cwd` / `list_dir` / `make_dir` / `create_file` / `delete_dir` / `delete_file` /
   `rename_dir` / `rename_file` / `read_file`（整文件截断 51200 字符、支持行范围）/
   `write_file` / `edit_file`（`old_text`→`new_text` 精确唯一替换）/ `copy` / `move` / `exec_cmd`（带超时）。
@@ -74,6 +73,7 @@ remote-go/
 ├── main.go         # 入口：配置/参数、拨号、握手、心跳、分发
 ├── protocol.go     # 包头/TLV 编解码、PacketReader、阻塞取包
 ├── crypto.go       # ChaCha20 + EncryptedConn + key 派生
+├── runtime_config.go # 注册 ACK 下发的运行时心跳/命令超时（读写锁）
 ├── actions.go      # 动作分发与简单文件操作
 ├── actions_read.go # 读取/行范围
 ├── actions_write.go # 写入/编辑

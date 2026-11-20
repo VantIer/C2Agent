@@ -60,6 +60,7 @@ const (
 	cmdDisconnect       = 0x84
 	cmdShutdown         = 0x85
 	cmdRegisterConfirm  = 0x86
+	cmdRegisterAck      = 0x87
 )
 
 // Data packet end flags (occupy the cmd byte).

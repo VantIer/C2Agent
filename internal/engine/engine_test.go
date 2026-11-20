@@ -382,6 +382,79 @@ func TestStopPersistsMarkerAndPartial(t *testing.T) {
 	}
 }
 
+// Stop during execution must still complete the assistant tool_calls message:
+// every tool_call needs a matching role=tool entry, including the cancelled
+// call and the calls that never started.
+type blockingBackend struct {
+	fakeBackend
+	started chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingBackend) Execute(ctx context.Context, action string, _ map[string]any) (string, error) {
+	b.fakeBackend.mu.Lock()
+	b.fakeBackend.actions = append(b.fakeBackend.actions, action)
+	b.fakeBackend.mu.Unlock()
+	b.once.Do(func() { close(b.started) })
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func TestStopDuringExecutionCompletesToolResults(t *testing.T) {
+	br := &blockingBackend{started: make(chan struct{})}
+	reg := agent.NewRegistry()
+	reg.Register(agent.New(agent.Options{
+		ID: "a1", Kind: agent.KindNative, OS: "Linux", Backend: br,
+	}))
+
+	cfg := config.Default()
+	cfg.Policy.AuthMode = 2
+	cfg.Policy.RoundLimit = 5
+
+	calls := []llm.ToolCall{
+		{ID: "c1", Name: "exec_cmd", Arguments: `{"command":"sleep 100"}`},
+		{ID: "c2", Name: "list_dir", Arguments: `{"path":"."}`},
+	}
+	el := &fakeLLM{turns: []*llm.ChatResult{{
+		ToolCalls: calls,
+		Raw:       llm.AssistantMessage("", calls),
+	}}}
+	eng := NewWithClient(cfg, reg, el)
+	s, err := eng.NewSession("a1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.BeginChat(s.ID, "go"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-br.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("backend did not start")
+	}
+	eng.Stop(s.ID)
+	waitIdle(t, eng, s.ID)
+
+	hist := eng.GetSession(s.ID).historyCopy()
+	// user + assistant(tool_calls) + tool(c1) + tool(c2)
+	if len(hist) != 4 {
+		t.Fatalf("expected 4 history messages, got %d: %+v", len(hist), hist)
+	}
+	data, err := json.Marshal(hist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"c1", "c2"} {
+		if !strings.Contains(string(data), `"tool_call_id":"`+id+`"`) {
+			t.Fatalf("missing tool result for %s in history: %s", id, data)
+		}
+	}
+	if br.called("list_dir") {
+		t.Fatal("the remaining tool call must not execute after a stop")
+	}
+}
+
 // A disconnected agent must not take its sessions down: they are kept so a
 // reconnect with the same id can resume them (session resilience).
 func TestSessionsSurviveAgentDisconnect(t *testing.T) {

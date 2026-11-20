@@ -23,14 +23,16 @@ func TestNativeEndToEnd(t *testing.T) {
 	const token = "unit-test-token"
 	reg := agent.NewRegistry()
 	srv := NewServer(ServerOptions{
-		Registry:         reg,
-		Host:             "127.0.0.1",
-		Port:             0,
-		AuthToken:        token,
-		HeartbeatTimeout: 60 * time.Second,
-		CmdTimeout:       5 * time.Second,
-		TimeoutAction:    "disconnect",
-		QueueCapacity:    16,
+		Registry:                  reg,
+		Host:                      "127.0.0.1",
+		Port:                      0,
+		AuthToken:                 token,
+		HeartbeatTimeout:          60 * time.Second,
+		CmdTimeout:                5 * time.Second,
+		TimeoutAction:             "disconnect",
+		QueueCapacity:             16,
+		AgentHeartbeatIntervalSec: 40,
+		AgentCmdTimeoutSec:        5,
 	})
 	if err := srv.Start(); err != nil {
 		t.Fatalf("start: %v", err)
@@ -85,7 +87,23 @@ func TestNativeEndToEnd(t *testing.T) {
 			return
 		}
 
-		// 4. serve requests until the test closes the connection
+		// 4. register_ack (encrypted) carries the runtime timing.
+		ack, err := readPacketFrom(enc, pr, 5*time.Second)
+		if err != nil {
+			agentErr <- err
+			return
+		}
+		if ack.Cmd != protocol.CmdRegisterAck {
+			agentErr <- errUnexpected{what: "expected register_ack", got: ack.Cmd}
+			return
+		}
+		ackParams, derr := protocol.DecodeTLV(ack.Body)
+		if derr != nil || len(ackParams) != 2 || ackParams[0] != "40" || ackParams[1] != "5" {
+			agentErr <- errUnexpected{what: "bad register_ack payload", got: ack.Cmd}
+			return
+		}
+
+		// 5. serve requests until the test closes the connection
 		for {
 			pkt, err := readPacketFrom(enc, pr, time.Second)
 			if err != nil {

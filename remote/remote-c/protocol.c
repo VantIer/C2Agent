@@ -5,6 +5,10 @@
  * heartbeat thread and the serve thread must not write concurrently. */
 static c2a_mutex_t g_write_mu;
 
+/* Upper bound for one blocking packet read. Callers use smaller values where
+ * appropriate; the cap guarantees a single wait cannot exceed this limit. */
+#define MAX_PACKET_TIMEOUT_MS 30000
+
 void c2a_mutex_init(c2a_mutex_t *m) {
 #ifdef _WIN32
     InitializeCriticalSection(m);
@@ -309,10 +313,14 @@ int recv_more(sockfd_t sock, bytebuf_t *b) {
 int take_packet_blocking(sockfd_t sock, bytebuf_t *b,
                          uint64_t *req_id, uint8_t *cmd,
                          const uint8_t **body, uint32_t *body_len, int timeout_ms) {
+    if (timeout_ms > MAX_PACKET_TIMEOUT_MS) timeout_ms = MAX_PACKET_TIMEOUT_MS;
+    const int64_t deadline = now_ms() + (int64_t)timeout_ms;
     for (;;) {
         int have = bb_take_packet(b, req_id, cmd, body, body_len);
         if (have != 0) return have;
-        if (wait_sock(sock, timeout_ms) <= 0) return 0; /* timeout */
+        int64_t remaining = deadline - now_ms();
+        if (remaining <= 0) return 0; /* timeout */
+        if (wait_sock(sock, (int)remaining) <= 0) return 0; /* timeout */
         int r = recv_more(sock, b);
         if (r <= 0) return -1;
     }

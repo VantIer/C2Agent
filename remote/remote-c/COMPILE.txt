@@ -51,8 +51,6 @@ Example (all CLI args, no config file needed):
     ./c2agent_remote --c2-address 192.168.1.100:8881 \
                    --agent-id BOT-01 \
                    --auth-token token-for-server-01 \
-                   --heartbeat-interval 30 \
-                   --cmd-timeout 60 \
                    --reconnect-initial 1 \
                    --reconnect-max 60
 
@@ -63,10 +61,12 @@ Or with a JSON config file (default: config.json, same flat schema):
 CLI arguments override config-file values; config-file values override the
 built-in defaults. Required: c2-address, agent-id, auth-token.
 
-The agent is headless: it dials the C2, registers, sends heartbeats every
---heartbeat-interval seconds, and reconnects with exponential backoff
-(--reconnect-initial ... --reconnect-max) when the connection drops. All
-file / shell operations are driven by the C2 over the protocol.
+The agent is headless: it dials the C2, registers, reads the C2's
+register_ack (heartbeat_interval_sec / cmd_timeout), sends heartbeats at that
+interval, and reconnects with exponential backoff (--reconnect-initial ...
+--reconnect-max) when the connection drops. Timing is supplied by the C2, not
+by the agent config. All file / shell operations are driven by the C2 over the
+protocol.
 
 --------------------------------------------------------------------------------
  Protocol compatibility

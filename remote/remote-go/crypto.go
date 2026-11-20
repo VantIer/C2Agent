@@ -153,3 +153,18 @@ func (e *encryptedConn) Read(p []byte) (int, error) {
 	}
 	return n, err
 }
+
+// decryptBuffered re-keys bytes that the handshake read from the raw socket
+// beyond the register_response packet. Any such bytes belong to the encrypted
+// C2 -> Agent stream and must be decrypted before the packet reader parses
+// them (mirrors the C2's own handshake leftover handling).
+func (e *encryptedConn) decryptBuffered(pr *packetReader) {
+	if len(pr.buf) == 0 {
+		return
+	}
+	raw := pr.buf
+	pr.buf = nil
+	out := make([]byte, len(raw))
+	e.rx.xorKeyStream(out, raw)
+	pr.feed(out)
+}

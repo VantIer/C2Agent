@@ -43,16 +43,19 @@ func main() {
 
 	var nativeSrv *native.Server
 	if cfg.Native.Enabled {
+		agentHeartbeatSec, agentCmdTimeoutSec := cfg.AgentTiming()
 		nativeSrv = native.NewServer(native.ServerOptions{
-			Registry:         reg,
-			Host:             cfg.Native.ListenHost,
-			Port:             cfg.Native.ListenPort,
-			AuthToken:        cfg.Native.AuthToken,
-			HeartbeatTimeout: time.Duration(cfg.Native.HeartbeatTimeoutSec) * time.Second,
-			CmdTimeout:       cmdTimeout,
-			TimeoutAction:    cfg.Policy.TimeoutAction,
-			QueueCapacity:    cfg.Policy.QueueCapacity,
-			Logger:           logger,
+			Registry:                  reg,
+			Host:                      cfg.Native.ListenHost,
+			Port:                      cfg.Native.ListenPort,
+			AuthToken:                 cfg.Native.AuthToken,
+			HeartbeatTimeout:          time.Duration(cfg.Native.HeartbeatTimeoutSec) * time.Second,
+			CmdTimeout:                cmdTimeout,
+			TimeoutAction:             cfg.Policy.TimeoutAction,
+			QueueCapacity:             cfg.Policy.QueueCapacity,
+			AgentHeartbeatIntervalSec: agentHeartbeatSec,
+			AgentCmdTimeoutSec:        agentCmdTimeoutSec,
+			Logger:                    logger,
 		})
 		if err := nativeSrv.Start(); err != nil {
 			logger.Fatalf("native listener: %v", err)

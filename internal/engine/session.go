@@ -387,9 +387,13 @@ func (e *Engine) executeToolCall(s *Session, tc llm.ToolCall, action string, par
 
 	if r.Err != nil {
 		if r.Err == agent.ErrCancelled {
-			// The user stopped the session (or the job was cancelled): report
-			// it as a stop, not as an execution failure.
-			e.publishNow(s, Event{"type": "stopped"})
+			// The user stopped the session (or the job was cancelled). Keep
+			// the LLM history valid: every tool_call in the current assistant
+			// message must have a matching tool result, including the current
+			// call and all calls that were never started.
+			e.appendTool(s, tc.ID, action, params, "Error: cancelled by user")
+			e.abortRemaining(s, remaining, "Error: cancelled by user")
+			e.markStopped(s)
 			return toolStop
 		}
 		if r.Err == agent.ErrClosed {

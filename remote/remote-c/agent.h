@@ -57,6 +57,8 @@ typedef int sockfd_t;
 #define MAX_STORED_OUTPUT (MAX_OUTPUT_BYTES - (sizeof OUTPUT_TRUNCATED_MARKER - 1))
 /* Upper bound on a single packet body (32 MiB), matching the Go control end. */
 #define PROTO_MAX_BODY_LEN (32u << 20)
+/* Upper bound for timing values received in register_ack. */
+#define MAX_RUNTIME_TIMING_SEC 600
 
 /* Action commands (C2 -> Agent). */
 #define CMD_LIST_DIR      0x01
@@ -84,6 +86,7 @@ typedef int sockfd_t;
 #define CMD_DISCONNECT        0x84
 #define CMD_SHUTDOWN          0x85
 #define CMD_REGISTER_CONFIRM  0x86
+#define CMD_REGISTER_ACK      0x87
 
 #define END_FLAG_CONTINUE 0
 #define END_FLAG_LAST     1
@@ -114,6 +117,21 @@ void proto_global_init(void);
 
 /* Enable TCP keepalive on a connected socket (detects half-open peers). */
 void set_keepalive(sockfd_t sock);
+
+/* ---------- runtime-adjustable timing ----------
+   The C2 supplies heartbeat_interval and cmd_timeout in register_ack right
+   after the handshake. The mutex makes an update safe while the heartbeat
+   thread / dispatcher are reading the values. */
+typedef struct {
+    c2a_mutex_t mu;
+    int heartbeat_interval; /* seconds */
+    int cmd_timeout;        /* seconds */
+} runtime_config_t;
+
+void runtime_config_init(runtime_config_t *rc);
+void runtime_config_set(runtime_config_t *rc, int heartbeat_interval, int cmd_timeout);
+/* Pass NULL for a value that is not needed. */
+void runtime_config_get(runtime_config_t *rc, int *heartbeat_interval, int *cmd_timeout);
 
 /* ---------- incoming stream buffer ----------
    Valid bytes are data[off .. off+len). `off` is the consumed prefix;

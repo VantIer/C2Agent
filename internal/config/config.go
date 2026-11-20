@@ -13,6 +13,11 @@ import (
 	"strings"
 )
 
+// MaxTimingSec is the upper bound for native heartbeat / command timing
+// values. Keeping timing within one minute-scale range avoids overflow in
+// integer-based agents and keeps watchdog behavior predictable.
+const MaxTimingSec = 600
+
 const defaultSystemPrompt = `You are an AI assistant that helps the user execute tasks.
 CURRENT OPERATING SYSTEM: {system_name}
 
@@ -213,6 +218,14 @@ func (c *Config) normalize() error {
 		c.Policy.TimeoutAction = "disconnect"
 	}
 
+	if c.Native.HeartbeatTimeoutSec > MaxTimingSec {
+		return fmt.Errorf("native.heartbeat_timeout_sec (%ds) exceeds maximum (%ds)",
+			c.Native.HeartbeatTimeoutSec, MaxTimingSec)
+	}
+	if c.Policy.CmdTimeout > MaxTimingSec {
+		return fmt.Errorf("policy.cmd_timeout (%ds) exceeds maximum (%ds)",
+			c.Policy.CmdTimeout, MaxTimingSec)
+	}
 	if c.Native.Enabled && strings.TrimSpace(c.Native.AuthToken) == "" {
 		return fmt.Errorf("native.enabled=true requires a non-empty native.auth_token")
 	}
@@ -245,6 +258,35 @@ func (c *Config) normalize() error {
 		return fmt.Errorf("web and shell listeners share %s:%d", c.Web.ListenHost, c.Web.ListenPort)
 	}
 	return nil
+}
+
+// AgentTiming returns the heartbeat interval and command timeout handed to a
+// native agent in the registration ACK.
+//
+// cmd_timeout is passed through from policy.cmd_timeout. The heartbeat
+// interval is ceil(2/3 * native.heartbeat_timeout_sec), so an agent reports
+// before the C2 watchdog expires.
+func (c *Config) AgentTiming() (heartbeatSec, cmdTimeoutSec int) {
+	base := c.Native.HeartbeatTimeoutSec
+	if base <= 0 {
+		base = 60
+	}
+	if base > MaxTimingSec {
+		base = MaxTimingSec
+	}
+	// ceil(2*base/3)
+	heartbeatSec = (2*base + 2) / 3
+	if heartbeatSec < 1 {
+		heartbeatSec = 1
+	}
+	cmdTimeoutSec = c.Policy.CmdTimeout
+	if cmdTimeoutSec < 1 {
+		cmdTimeoutSec = 60
+	}
+	if cmdTimeoutSec > MaxTimingSec {
+		cmdTimeoutSec = MaxTimingSec
+	}
+	return heartbeatSec, cmdTimeoutSec
 }
 
 // PrepareFileServer validates the optional file server settings and returns

